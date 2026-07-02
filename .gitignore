@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+
+# setuptools build artifacts (an editable `pip install -e .` writes *.egg-info here)
+*.egg-info/
+build/
+.eggs/
+
+# uv's lockfile — not tracked here: deps are declared in pyproject.toml / requirements.txt,
+# and the uv-runtime bundle resolves them at install time (the v1.0.0 bundle shipped no lock).
+uv.lock
+
+# Build output (the .mcpb is published via GitHub Releases, not committed)
+dist/
+
+# Never commit a private key / cert. (`mcpb sign --self-signed` keeps its own cert inside
+# its package dir, not here; this guards a project key if you ever sign with --cert/--key.)
+*.pem
