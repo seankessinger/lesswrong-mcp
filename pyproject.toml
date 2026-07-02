@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lesswrong-mcp"
+version = "1.0.0"
+description = "Read-only MCP server for LessWrong and the Alignment Forum."
+requires-python = ">=3.10"
+# pydantic and starlette are imported directly (Field; the /health custom_route and
+# TransportSecuritySettings), so declare them explicitly rather than leaning on mcp's
+# transitive tree. Upper caps guard against a future major relocating the APIs used here.
+dependencies = [
+    "mcp>=1.10,<2",
+    "httpx>=0.27,<1",
+    "pydantic>=2,<3",
+    "starlette>=0.37",
+]
+
+[project.optional-dependencies]
+# Test + lint deps. The suite drives the async tool handlers with asyncio.run(), so no
+# pytest-asyncio plugin is needed. Run with:  pytest  /  ruff check .  /  mypy lesswrong_mcp
+# The one live-endpoint test hits the real API and is skipped unless LW_LIVE_TESTS=1.
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.8"]
+
+# Console-script entry point. `python -m lesswrong_mcp` (via lesswrong_mcp/__main__.py) is the
+# other supported launcher; both call the same main(). Points at the facade package so it stays
+# valid as main() moves between submodules during the refactor.
+[project.scripts]
+lesswrong-mcp = "lesswrong_mcp:main"
+
+# The server is a package (lesswrong_mcp/). Declare it explicitly so setuptools installs
+# exactly it and never tries to package the tests/ directory (keeps `pip install -e '.[dev]'`,
+# used by CI and the README, unambiguous).
+[tool.setuptools]
+packages = ["lesswrong_mcp"]
+
+[tool.pytest.ini_options]
+# Tests live in tests/; add the repo root to sys.path so `import lesswrong_mcp` resolves
+# whether or not the package is pip-installed (the local run imports it straight from the
+# source tree, CI runs against the editable install — both work).
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# ruff: the default rule set (pyflakes F + a slice of pycodestyle E). Line length is set
+# generously and E501 is left out of the selection — the tool docstrings/Field descriptions
+# are intentionally long single lines — so length isn't enforced. Import ordering (I) is left
+# off deliberately: the import blocks are grouped by meaning, not alphabetised.
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+# __init__.py is a deliberate re-export facade (see its module docstring): every name is
+# imported precisely to be re-exported, so the "imported but unused" rule doesn't apply.
+"__init__.py" = ["F401"]
+
+# mypy: non-strict to keep the bar reachable (the GraphQL layer is dict[str, Any] by nature);
+# ignore missing third-party stubs. Type-checks the package only, not the tests.
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true

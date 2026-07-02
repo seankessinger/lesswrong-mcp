@@ -1,0 +1,32 @@
+{
+  "manifest_version": "0.4",
+  "name": "lesswrong-mcp",
+  "display_name": "LessWrong / Alignment Forum",
+  "version": "1.0.0",
+  "description": "Read-only search and retrieval for LessWrong and the Alignment Forum.",
+  "long_description": "Query LessWrong and the Alignment Forum as tools: full-text search; fetch a post's full body and metadata; comment threads; user profiles; tag/wiki pages; sequences; front-page feeds; and precise filtering by author, tag, date range, and karma. Both forums share one backend; no authentication required. All tools are read-only.",
+  "author": { "name": "Sean Kessinger" },
+  "repository": { "type": "git", "url": "https://github.com/seankessinger/lesswrong-mcp.git" },
+  "homepage": "https://github.com/seankessinger/lesswrong-mcp",
+  "server": {
+    "type": "uv",
+    "entry_point": "lesswrong_mcp/__main__.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "-m", "lesswrong_mcp"]
+    }
+  },
+  "tools": [
+    { "name": "lw_search", "description": "Full-text search across both forums over posts, comments, tags, users, and sequences." },
+    { "name": "lw_get_post", "description": "Fetch a post's full body and metadata by id or slug." },
+    { "name": "lw_get_comments", "description": "Fetch a post's comment thread." },
+    { "name": "lw_get_user", "description": "Fetch a user profile and their top posts." },
+    { "name": "lw_get_tag", "description": "Fetch a tag / wiki page and its posts." },
+    { "name": "lw_get_sequence", "description": "Fetch a sequence and its ordered list of posts." },
+    { "name": "lw_list_feed", "description": "List a front-page feed (latest / recent / curated / home)." },
+    { "name": "lw_filter_posts", "description": "Filter posts by author, tag, date range, and karma with a sort order." }
+  ],
+  "keywords": ["lesswrong", "alignment forum", "ai alignment", "research", "mcp"],
+  "license": "MIT",
+  "compatibility": { "platforms": ["darwin", "linux", "win32"], "runtimes": { "python": ">=3.10" } }
+}
