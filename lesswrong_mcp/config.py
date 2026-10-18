@@ -1,65 +1,112 @@
-"""Configuration, version derivation, enums, and the site -> base-URL helper.
+"""Configuration, version derivation, the tools' choice types, and the site base URLs.
 
 The pure leaf: imports nothing from the package, so it can never introduce a cycle.
 """
 from __future__ import annotations
 
 import importlib.metadata
+import logging
+import math
 import os
-import re
-from collections.abc import Callable
-from enum import Enum
-from typing import TypeVar
+from collections.abc import Callable, Mapping
+from typing import Literal, TypeVar, get_args
 
-import httpx
+log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
 
-def _env_num(env, name: str, default: _T, cast: Callable[[str], _T], *, positive: bool = False) -> _T:
-    """Parse ``env[name]`` with ``cast``, falling back to ``default`` when unset, blank, or
-    malformed — these are tuning knobs, so a bad override must not crash the server at import.
-    The mapping is passed in (not read from ``os.environ``) so the parse is unit-testable.
+# Plain comparisons: NaN fails them, and an int of any size compares exactly, with no
+# conversion to float that could overflow.
+def _positive(value: float) -> bool:
+    """Finite and > 0: a zero or NaN timeout expires at once, and Semaphore(0) deadlocks."""
+    return 0 < value < math.inf
 
-    ``positive=True`` also rejects ``<= 0``, which is nonsensical *and* breaks the client:
-    0 retries empties ``range(MAX_RETRIES)`` and trips the retry loop's "unreachable" guard,
-    0 concurrency deadlocks on ``Semaphore(0)``, and a non-positive timeout errors.
+
+def _non_negative(value: float) -> bool:
+    """Finite and >= 0: zero is a meaningful setting (LW_MAX_RETRIES=0 disables retries)."""
+    return 0 <= value < math.inf
+
+
+def _env_num(
+    env: Mapping[str, str],
+    name: str,
+    default: _T,
+    cast: Callable[[str], _T],
+    *,
+    valid: Callable[[_T], bool] | None = None,
+) -> _T:
+    """Parse ``env[name]`` with ``cast``, falling back to ``default`` when unset, blank,
+    malformed, or rejected by ``valid``. These are tuning knobs, so a bad override must not
+    crash the server at import; a set-but-rejected value is logged at WARNING so it is not
+    silently ignored. The mapping is passed in (not read from ``os.environ``) so the parse is
+    unit-testable.
     """
     raw = env.get(name)
-    if raw is None or not str(raw).strip():
+    if raw is None or not raw.strip():
         return default
     try:
-        value = cast(str(raw).strip())
+        value = cast(raw.strip())
     except (TypeError, ValueError):
-        return default
-    if positive and value <= 0:  # type: ignore[operator]
-        return default
-    return value
+        pass
+    else:
+        if valid is None or valid(value):
+            return value
+    log.warning("Ignoring %s=%r; using the default %r.", name, raw, default)
+    return default
 
-SITE_BASE_URLS: dict[str, str] = {
+
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+
+def _log_level(env: Mapping[str, str]) -> LogLevel:
+    """The LW_LOG_LEVEL setting, or INFO when unset or unrecognised. The SDK reads no
+    environment variable for its log level, so the server reads this one and hands it to the
+    MCPServer constructor."""
+    raw = (env.get("LW_LOG_LEVEL") or "").strip()
+    for level in get_args(LogLevel):
+        if raw.upper() == level:
+            return level
+    if raw:
+        log.warning("Ignoring LW_LOG_LEVEL=%r; using INFO.", raw)
+    return "INFO"
+
+
+# The closed choices the tools accept. As Literal aliases they render as inline JSON-Schema
+# enums, and mypy checks every internal caller against them.
+Site = Literal["lesswrong", "alignmentforum"]
+ResponseFormat = Literal["markdown", "json"]
+SearchType = Literal["posts", "comments", "tags", "users", "sequences"]
+CommentSort = Literal["top", "new", "old"]
+Feed = Literal["latest", "recent", "curated", "home"]
+PostSort = Literal["top", "new", "old", "magic", "recentComments"]
+
+# Both forums run one backend; the site only switches the base URL.
+SITE_BASE_URLS: dict[Site, str] = {
     "lesswrong": "https://www.lesswrong.com",
     "alignmentforum": "https://www.alignmentforum.org",
 }
-DEFAULT_SITE = "lesswrong"
 
 # Read the installed package metadata, falling back to a literal for a non-installed source
 # tree. Keeps the User-Agent in lock-step with pyproject.toml.
 try:
     __version__ = importlib.metadata.version("lesswrong-mcp")
 except importlib.metadata.PackageNotFoundError:  # running from a non-installed source tree
-    __version__ = "1.0.0"
+    __version__ = "2.0.0"
 
+# The "+URL" names where the forum's operators can find this client and its maintainer.
 USER_AGENT = (
-    f"lesswrong-mcp/{__version__} (read-only research client; "
-    "https://modelcontextprotocol.io)"
+    f"lesswrong-mcp/{__version__} "
+    "(+https://github.com/seankessinger/lesswrong-mcp; read-only research client)"
 )
+LOG_LEVEL = _log_level(os.environ)
 # Four HTTP knobs, env-overridable so an operator can dial politeness/latency without editing
 # source. HTTP_TIMEOUT is per-operation (connect/read/write); HTTP_TOTAL_TIMEOUT caps each
 # attempt's whole round-trip in _request, since httpx has no total-time bound (it is per
-# attempt, not across retries); MAX_RETRIES bounds the loop.
-HTTP_TIMEOUT = _env_num(os.environ, "LW_HTTP_TIMEOUT", 30.0, float, positive=True)
-HTTP_TOTAL_TIMEOUT = _env_num(os.environ, "LW_HTTP_TOTAL_TIMEOUT", 60.0, float, positive=True)
-MAX_RETRIES = _env_num(os.environ, "LW_MAX_RETRIES", 3, int, positive=True)
+# attempt, not across retries); MAX_RETRIES is the number of retries after the first attempt.
+HTTP_TIMEOUT = _env_num(os.environ, "LW_HTTP_TIMEOUT", 30.0, float, valid=_positive)
+HTTP_TOTAL_TIMEOUT = _env_num(os.environ, "LW_HTTP_TOTAL_TIMEOUT", 60.0, float, valid=_positive)
+MAX_RETRIES = _env_num(os.environ, "LW_MAX_RETRIES", 2, int, valid=_non_negative)
 # Two backend-imposed pagination ceilings, pinned by binary search against the live API
 # (2026-07-02). Surfaced as fast-failing bounds at the tool boundary so an opaque mid-call
 # backend error becomes an actionable one — and, for search, so a deterministic 500 doesn't
@@ -70,56 +117,12 @@ MAX_RETRIES = _env_num(os.environ, "LW_MAX_RETRIES", 3, int, positive=True)
 MAX_GRAPHQL_SKIP = 2000       # lw_filter_posts `offset`: skip must be <= this
 SEARCH_RESULT_WINDOW = 10000  # lw_search: page * limit must be <= this
 SEARCH_PAGE_MAX = 1000        # lw_search: the `page` upper bound (so a next-page hint stays valid)
-# 17-char alphanumeric = a ForumMagnum document _id; anything else is treated as a slug.
-_ID_RE = re.compile(r"^[A-Za-z0-9]{17}$")
+# Bounds the slug-resolution round-trips (one per distinct tag) a single call can trigger.
+MAX_TAG_FILTERS = 10          # lw_filter_posts `tags`: items per call
+# The longest slice lw_get_post / lw_get_comments return (a short paging footer follows it), and
+# their default: hosts spill a larger tool result to a file and show the model only a preview
+# (Claude Code does past 50,000 characters), so a long body is read by paging with the footer's
+# offset instead.
+MAX_CHARS = 40_000
 # Politeness: cap concurrent in-flight requests (the semaphore lives in _resources).
-_CONCURRENCY_LIMIT = _env_num(os.environ, "LW_CONCURRENCY", 4, int, positive=True)
-# SSRF guard: redirects may only stay on the two forum hosts. Allows the API's legitimate
-# same-host slug -> canonical redirects; refuses a cross-host Location (e.g. link-local).
-_ALLOWED_HOSTS = frozenset(httpx.URL(u).host for u in SITE_BASE_URLS.values())
-
-
-class Site(str, Enum):
-    """Which forum to query. Both share one backend; this switches the base URL."""
-    lesswrong = "lesswrong"
-    alignmentforum = "alignmentforum"
-
-
-class ResponseFormat(str, Enum):
-    markdown = "markdown"
-    json = "json"
-
-
-class SearchType(str, Enum):
-    """A single content type to restrict lw_search to. Omit to search all of them."""
-    posts = "posts"
-    comments = "comments"
-    tags = "tags"
-    users = "users"
-    sequences = "sequences"
-
-
-class CommentSort(str, Enum):
-    top = "top"
-    new = "new"
-    old = "old"
-
-
-class Feed(str, Enum):
-    latest = "latest"
-    recent = "recent"
-    curated = "curated"
-    home = "home"
-
-
-class PostSort(str, Enum):
-    """Sort orders accepted by the GraphQL post views."""
-    top = "top"                        # highest karma
-    new = "new"                        # newest first
-    old = "old"                        # oldest first
-    magic = "magic"                    # the site's default "hot" ranking
-    recentComments = "recentComments"  # recently-active discussions
-
-
-def _base(site: str) -> str:
-    return SITE_BASE_URLS.get(site, SITE_BASE_URLS[DEFAULT_SITE])
+_CONCURRENCY_LIMIT = _env_num(os.environ, "LW_CONCURRENCY", 4, int, valid=_positive)

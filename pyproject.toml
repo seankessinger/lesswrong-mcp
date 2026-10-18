@@ -1,31 +1,62 @@
 [build-system]
-requires = ["setuptools>=61"]
+# `license` is an SPDX expression (PEP 639), which needs setuptools 77: 76 rejects it, and
+# 77.0.3 is the release the PyPA packaging guide lists for that support.
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "lesswrong-mcp"
-version = "1.0.0"
+version = "2.0.0"
 description = "Read-only MCP server for LessWrong and the Alignment Forum."
-requires-python = ">=3.10"
-# pydantic and starlette are imported directly (Field; the /health custom_route and
-# TransportSecuritySettings), so declare them explicitly rather than leaning on mcp's
-# transitive tree. Upper caps guard against a future major relocating the APIs used here.
-dependencies = [
-    "mcp>=1.10,<2",
-    "httpx>=0.27,<1",
-    "pydantic>=2,<3",
-    "starlette>=0.37,<2",
+# 3.11 is the oldest CPython still in upstream support: 3.10 reached end of life on 2026-10-01
+# (PEP 619).
+requires-python = ">=3.11"
+# No `readme`: the package is not published to an index, the one place a long description
+# shows, and the bundle builds it from a tree without README.md, where setuptools would warn
+# on every build. LICENSE ships through setuptools' default license-files globs.
+license = "MIT"
+authors = [{ name = "Sean Kessinger" }]
+keywords = ["lesswrong", "alignment forum", "ai alignment", "research", "mcp"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# httpx and pydantic are imported directly (the pooled forum client; Field, the validators,
+# ValidationError, and PydanticCustomError from pydantic_core, which pydantic pins), so declare
+# them explicitly rather than leaning on mcp's transitive tree, which carries httpx2 rather than
+# httpx. Upper caps guard against a future major relocating the APIs used here. Each floor is
+# the version CI's test-lowest job installs: mcp 2.3.0 is the first release that honours
+# MCPServer(subscriptions=False) and omits the empty `experimental` capability, and it is past
+# every published 2.x advisory; pydantic 2.12 is the lowest release mcp accepts. This is the
+# only dependency list.
+dependencies = [
+    "mcp>=2.3.0,<3",
+    "httpx>=0.27,<1",
+    "pydantic>=2.12,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/seankessinger/lesswrong-mcp"
+Repository = "https://github.com/seankessinger/lesswrong-mcp"
+Issues = "https://github.com/seankessinger/lesswrong-mcp/issues"
 
 [project.optional-dependencies]
 # Test + lint deps. The suite drives the async tool handlers with asyncio.run(), so no
 # pytest-asyncio plugin is needed. Run with:  pytest  /  ruff check .  /  mypy lesswrong_mcp
 # The opt-in live-endpoint tests hit the real API and are skipped unless LW_LIVE_TESTS=1.
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.8"]
+# jsonschema is imported directly by the schema tests, so it is declared rather than left to
+# mcp's transitive tree.
+dev = ["pytest>=8", "jsonschema>=4", "ruff>=0.6", "mypy>=1.8"]
 
 # Console-script entry point. `python -m lesswrong_mcp` (via lesswrong_mcp/__main__.py) is the
-# other supported launcher; both call the same main(). It targets the re-export facade rather
-# than lesswrong_mcp.cli directly, so the entry point survives main() moving between submodules.
+# other supported launcher; both call the same main(). It names the package's public `main`
+# rather than lesswrong_mcp.cli.main, so it depends only on the public surface.
 [project.scripts]
 lesswrong-mcp = "lesswrong_mcp:main"
 
@@ -41,31 +72,31 @@ packages = ["lesswrong_mcp"]
 # source tree, CI runs against the editable install — both work).
 testpaths = ["tests"]
 pythonpath = ["."]
+# A misspelt marker is an error, not a silently unmarked test: `live` decides whether a test
+# may reach the real forum (tests/conftest.py gates it on LW_LIVE_TESTS).
+addopts = ["--strict-markers"]
+markers = ["live: reaches the real forum API; runs only with LW_LIVE_TESTS=1"]
 
 # ruff: an EXPLICIT rule set — pyflakes (F) plus the pycodestyle slice (E4/E7/E9) that ruff
 # shipped as its default for years. Pin it rather than inheriting whatever "default" means
 # today: ruff 0.16 widened its defaults to ~400 rules, which silently switched on checks this
 # repo deliberately does not want — notably I (import ordering: the import blocks here are
-# grouped by meaning, not alphabetised) and TRY004 (a false positive on the intentional
-# RuntimeError in http_client._graphql, which must stay a RuntimeError to reach the
+# grouped by meaning, not alphabetised) and TRY004 (it wants a TypeError after an isinstance
+# check, but the shape checks in http_client._graphql must raise ForumAPIError to reach the
 # _tool_errors funnel). CI installs the newest ruff, so an unpinned selection breaks the lint
 # job on a release that has nothing to do with this code. E501 stays out of the selection —
 # the tool docstrings / Field descriptions are intentionally long single lines — so
 # line-length is configured for the formatter's benefit but not enforced as a lint error.
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
 
-[tool.ruff.lint.per-file-ignores]
-# __init__.py is a deliberate re-export facade (see its module docstring): every name is
-# imported precisely to be re-exported, so the "imported but unused" rule doesn't apply.
-"__init__.py" = ["F401"]
-
-# mypy: non-strict to keep the bar reachable (the GraphQL layer is dict[str, Any] by nature);
-# ignore missing third-party stubs. Type-checks the package only, not the tests.
+# mypy: every def is annotated, but --strict stays off (the GraphQL layer is dict[str, Any] by
+# nature); ignore missing third-party stubs. Type-checks the package only, not the tests.
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 ignore_missing_imports = true
+disallow_untyped_defs = true

@@ -1,25 +1,29 @@
-"""The FastMCP server singleton and the tool-registration machinery.
+"""The MCP server singleton and the tool-registration machinery.
 
-Owns `mcp`, the shared read-only annotations, the SiteParam alias, the `_tool_errors` funnel,
-and the inputSchema flattening. Must NOT import the tools module — that would bind @mcp.tool
-before `mcp` exists. Registration happens when something imports `tools` for its side effect.
+Owns `mcp` (a `LessWrongServer`) with its instructions and lifespan, the shared read-only
+annotations, the shared parameter aliases, the `_tool_errors` funnel, the inputSchema
+flattening, and `lw_tool`, the one way a tool is registered. Must NOT import the tools module —
+that would bind @lw_tool before `mcp` exists. Registration happens when something imports
+`tools` for its side effect.
 """
 from __future__ import annotations
 
 import functools
 import inspect
-from typing import Annotated, Any
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
+from typing import Annotated, Any, ParamSpec
 
 import httpx
-from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
-from pydantic import Field
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, InputRequiredResult, Tool, ToolAnnotations
+from pydantic import Field, ValidationError, ValidatorFunctionWrapHandler, WrapValidator
+from pydantic_core import PydanticCustomError
 
 from lesswrong_mcp import http_client
-from lesswrong_mcp.config import Site
-from lesswrong_mcp.markdown import _handle_error
-
-mcp = FastMCP("lesswrong_mcp", lifespan=http_client._lifespan)
+from lesswrong_mcp.config import LOG_LEVEL, MAX_CHARS, MAX_TAG_FILTERS, Site, __version__
+from lesswrong_mcp.errors import SHAPE, ForumAPIError, Kind, _handle_error
 
 
 # --------------------------------------------------------------------------- #
@@ -27,13 +31,13 @@ mcp = FastMCP("lesswrong_mcp", lifespan=http_client._lifespan)
 # --------------------------------------------------------------------------- #
 
 # All eight tools are read-only, non-destructive, idempotent, and open-world.
-# `_readonly_annotations` stamps a per-tool title onto a copy (FastMCP wants a
+# `_readonly_annotations` stamps a per-tool title onto a copy (MCPServer wants a
 # ToolAnnotations, so a bare dict would trip the type check).
 _READONLY = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 
@@ -41,126 +45,236 @@ def _readonly_annotations(title: str) -> ToolAnnotations:
     """The shared read-only annotations with `title` set — one per tool."""
     return _READONLY.model_copy(update={"title": title})
 
-# Seven of the eight tools share this parameter. PEP 593 aliases are transparent to
-# inspect.signature / Pydantic, so the schema matches spelling it out inline.
+# Parameters several tools share. PEP 593 aliases are transparent to inspect.signature /
+# Pydantic, so the schema matches spelling them out inline; the bounds-only aliases take each
+# tool's own description from an outer Field, which Pydantic merges in.
 SiteParam = Annotated[Site, Field(description="'lesswrong' (default) or 'alignmentforum'.")]
+MaxCharsParam = Annotated[int, Field(ge=500, le=MAX_CHARS)]
+OffsetParam = Annotated[int, Field(ge=0, le=10_000_000)]
+
+# Every identifier is one bare value: a post, comment or sequence _id, or a post, user or tag
+# slug. Nothing that matches can hold '/', '.', '?', '#', '%', whitespace or a non-ASCII
+# letter, and pydantic's regex engine anchors '$' at the very end, so a value goes into its
+# route as given. The pattern needs at least one character, so it also refuses an empty value.
+_REF = r"^[A-Za-z0-9_-]+$"
 
 
-def _tool_errors(fn=None, *, not_found: str | None = None, id_param: str | None = None):
-    """Funnel a tool's anticipated network/API failures through _handle_error, so each tool
-    body is just its happy path. Only the expected types become an "Error: ..." string;
-    anything else propagates so FastMCP marks the result isError=True rather than masking a
-    fault as success text.
+def _shape_error(kind: Kind) -> WrapValidator:
+    """Report a value that misses its pattern with SHAPE[kind] instead of pydantic's regex text.
 
-    Usable bare or parameterised (`@_tool_errors(not_found="post", id_param="id_or_slug")`),
-    where a 404 then names the subject and echoes the caller's identifier.
-
-    functools.wraps preserves the real signature and docstring for FastMCP, so @mcp.tool must
-    stay the OUTERMOST decorator.
+    Only a pattern miss is replaced, since pydantic's text for it names nothing but the regex;
+    a length or type error passes through as pydantic words it.
     """
-    def decorate(f):
-        sig = inspect.signature(f)
+    def validate(value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            if any(error["type"] == "string_pattern_mismatch" for error in exc.errors()):
+                raise PydanticCustomError("ref_shape", SHAPE[kind]) from None
+            raise
 
-        @functools.wraps(f)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await f(*args, **kwargs)
-            # RuntimeError is caught broadly ON PURPOSE: it is the funnel's channel for
-            # _graphql / redirect-guard failures, and httpx itself raises a bare RuntimeError
-            # for a closed client (the failure _STATELESS_HTTP guards against) — which should
-            # surface as a readable error, not a crashed tool. Don't narrow it to a subclass.
-            except (
-                httpx.HTTPStatusError,
-                httpx.TimeoutException,
-                httpx.TransportError,
-                RuntimeError,
-            ) as exc:
-                bad_value = None
-                if id_param is not None:
-                    try:
-                        bad_value = sig.bind(*args, **kwargs).arguments.get(id_param)
-                    except TypeError:
-                        bad_value = None
-                return _handle_error(exc, not_found=not_found, bad_value=bad_value)
-        return wrapper
+    return WrapValidator(validate)
 
-    return decorate if fn is None else decorate(fn)
+
+PostRef = Annotated[str, Field(max_length=300, pattern=_REF), _shape_error("post")]
+CommentRef = Annotated[str, Field(max_length=300, pattern=_REF), _shape_error("comment")]
+UserRef = Annotated[str, Field(max_length=300, pattern=_REF), _shape_error("user")]
+TagRef = Annotated[str, Field(max_length=300, pattern=_REF), _shape_error("tag")]
+SequenceRef = Annotated[str, Field(max_length=300, pattern=_REF), _shape_error("sequence")]
+TagsParam = Annotated[list[TagRef], Field(min_length=1, max_length=MAX_TAG_FILTERS)]
+
+
+_P = ParamSpec("_P")
+# A tool handler: a coroutine function returning Markdown text.
+_Tool = Callable[_P, Coroutine[Any, Any, str]]
+
+
+def _tool_errors(fn: _Tool[_P], *, not_found: Kind | None, id_param: str | None) -> _Tool[_P]:
+    """Wrap a tool so its anticipated network/API failures raise a ToolError carrying a
+    readable message from _handle_error; the tool body is just its happy path and the client
+    gets a result with isError=True. MCPServer logs each ToolError once, at INFO with the tool
+    name, so the funnel adds no log line of its own. For a 404, `not_found` names the subject
+    and the `id_param` argument is echoed. functools.wraps keeps the real signature, which
+    MCPServer reads to build the tool's schema, and the docstring.
+    """
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> str:
+        try:
+            return await fn(*args, **kwargs)
+        # Only the anticipated failures: httpx's whole HTTPError family, httpx's InvalidURL
+        # (which sits outside it), and ForumAPIError (GraphQL errors, a malformed body, a
+        # refused redirect). No tool input can raise InvalidURL: it comes from a proxy or
+        # NO_PROXY variable httpx can't parse when it builds the client, and catching it keeps
+        # httpx's text, which can quote the start of a proxy password, out of the message and
+        # the logs. Anything else, a library RuntimeError included, is a fault and propagates
+        # untouched rather than being dressed up as a forum failure.
+        except (httpx.HTTPError, httpx.InvalidURL, ForumAPIError) as exc:
+            # The call above already bound these arguments, so binding them again succeeds.
+            bad_value = sig.bind(*args, **kwargs).arguments.get(id_param) if id_param else None
+            message = _handle_error(exc, not_found=not_found, bad_value=bad_value)
+            raise ToolError(message) from exc
+
+    return wrapper
 
 
 # --------------------------------------------------------------------------- #
 # inputSchema flattening
 #
-# Pydantic renders `X | None` as a nullable `anyOf` and an Enum as a `$ref` into `$defs`, so
-# a client that reads only top-level JSON-Schema keywords can't see the real constraints —
-# they sit a level down, and an out-of-range value then fails late as a runtime Pydantic
-# error instead of being caught (or shown to the model) up front. Hoist them: collapse the
-# nullable `anyOf`, inline `$ref` enums. The Pydantic models are untouched and stay the
-# runtime safety net.
+# Pydantic renders `X | None` as a nullable `anyOf`, so a client that reads only top-level
+# JSON-Schema keywords can't see the real constraints — they sit a level down, and an
+# out-of-range value then fails late as a runtime Pydantic error instead of being caught (or
+# shown to the model) up front. Hoist them by collapsing the nullable `anyOf`. The Pydantic
+# models are untouched and stay the runtime safety net.
 # --------------------------------------------------------------------------- #
 
-def _flatten_schema(node: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
-    """Return `node` with a top-level `$ref` inlined and a nullable `anyOf` collapsed, so
-    the property's constraints sit at the top level. Recurses so a `$ref` nested inside a
-    nullable `anyOf` (an `Enum | None`) is both inlined and made nullable."""
-    ref = node.get("$ref")
-    if ref:
-        # Inline the referenced $defs entry; the referrer's own keys (e.g. a param-specific
-        # `description`/`default`) win over the definition's.
-        target = defs.get(ref.rsplit("/", 1)[-1], {})
-        merged = {**target, **{k: v for k, v in node.items() if k != "$ref"}}
-        return _flatten_schema(merged, defs)
-
+def _flatten_schema(node: dict[str, Any]) -> dict[str, Any]:
+    """Return `node` with a nullable `anyOf` collapsed, so the property's constraints sit at
+    the top level. A `$ref` variant is left in place: the tools' choice types are Literals,
+    which render inline."""
     variants = node.get("anyOf")
     if variants and any(v.get("type") == "null" for v in variants):
         non_null = [v for v in variants if v.get("type") != "null"]
-        if len(non_null) == 1:
-            base = dict(_flatten_schema(non_null[0], defs))  # inline a $ref enum first
+        if len(non_null) == 1 and "$ref" not in non_null[0]:
+            base = dict(non_null[0])
             t = base.get("type")
             if isinstance(t, str):
                 base["type"] = [t, "null"]
-            elif t is None and "enum" in base and None not in base["enum"]:
-                # A typeless enum: fold null in as a permitted value rather than a `type`.
-                base["enum"] = [*base["enum"], None]
             # (an already-listed `type` is left as-is — idempotent.)
+            if "enum" in base and None not in base["enum"]:
+                # JSON Schema checks `enum` independently of `type`, so null must be listed
+                # here too or the property rejects its own null default.
+                base["enum"] = [*base["enum"], None]
             return {**base, **{k: v for k, v in node.items() if k != "anyOf"}}
     return node
 
 
-def _contains_ref(obj: Any) -> bool:
-    """True if a `$ref` survives anywhere in `obj` (so `$defs` is still needed)."""
-    if isinstance(obj, dict):
-        return "$ref" in obj or any(_contains_ref(v) for v in obj.values())
-    if isinstance(obj, list):
-        return any(_contains_ref(v) for v in obj)
-    return False
-
-
 def _flatten_parameters(schema: dict[str, Any]) -> dict[str, Any]:
-    """Flatten every property of a tool's JSON-Schema, dropping `$defs` once its enums are
-    inlined. A schema with no `properties` (e.g. a zero-argument tool) has nothing to
-    flatten and is returned **as the same object** — so callers that mutate must check
-    identity (see `_apply_flat_schemas`) before clearing it."""
-    props = schema.get("properties")
-    if not props:
-        return schema
-    defs = schema.get("$defs", {})
+    """Return a flattened copy of a tool's JSON-Schema (the input is never mutated): every
+    property flattened, and `additionalProperties: false` so clients see the closed shape
+    `LessWrongServer.call_tool` enforces."""
     out = dict(schema)
-    out["properties"] = {name: _flatten_schema(prop, defs) for name, prop in props.items()}
-    if "$defs" in out and not _contains_ref(out["properties"]):
-        del out["$defs"]
+    props = schema.get("properties")
+    if props:
+        out["properties"] = {name: _flatten_schema(prop) for name, prop in props.items()}
+    out["additionalProperties"] = False
     return out
 
 
-def _apply_flat_schemas(server: FastMCP) -> None:
-    """Rewrite every registered tool's advertised inputSchema in place (mutating the stored
-    `parameters` dict, which `FastMCP.list_tools` emits as `inputSchema`). Call once after
-    the tools are registered."""
-    for tool in server._tool_manager.list_tools():
-        flat = _flatten_parameters(tool.parameters)
-        # `_flatten_parameters` returns the SAME dict when there's nothing to flatten (a
-        # zero-argument tool has no `properties`); clearing it in place would then wipe the
-        # schema (type/title). Only mutate when a distinct, flattened dict came back.
-        if flat is tool.parameters:
-            continue
-        tool.parameters.clear()
-        tool.parameters.update(flat)
+# --------------------------------------------------------------------------- #
+# The server: a closed, flattened tool surface, and a lifespan that owns the pooled client
+# --------------------------------------------------------------------------- #
+
+class LessWrongServer(MCPServer[None]):
+    """MCPServer with a closed, flattened tool surface, applied through its public
+    `list_tools` and `call_tool` hooks (the protocol handlers call both).
+
+    `list_tools` advertises each tool's flattened schema (see `_flatten_parameters`).
+    `call_tool` refuses an argument the tool does not declare: MCPServer validates arguments
+    with a model that ignores unknown keys, so a misspelled argument would otherwise be
+    dropped silently. The refusal is a ToolError caused by a ValidationError, the shape of
+    MCPServer's own argument errors, so the client reads the same kind of text and the server
+    logs only the refused names. It runs before validation, so a call that also has an invalid
+    argument reports the unknown ones first; a required argument the call lacks is reported with
+    them, so a misspelt name comes back next to the one it stands for.
+    """
+
+    async def list_tools(self) -> list[Tool]:
+        return [
+            tool.model_copy(update={"input_schema": _flatten_parameters(tool.input_schema)})
+            for tool in await super().list_tools()
+        ]
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context[None, Any] | None = None
+    ) -> CallToolResult | InputRequiredResult:
+        # An unknown tool name falls through, so MCPServer reports it as usual.
+        tool = next((t for t in await super().list_tools() if t.name == name), None)
+        if tool is not None:
+            schema = tool.input_schema
+            unknown = [key for key in arguments if key not in schema["properties"]]
+            if unknown:
+                required = schema.get("required", ())
+                refused = [("missing", key, arguments) for key in required if key not in arguments]
+                refused += [("extra_forbidden", key, arguments[key]) for key in unknown]
+                error = ValidationError.from_exception_data(
+                    schema.get("title", name),
+                    [{"type": kind, "loc": (key,), "input": value} for kind, key, value in refused],
+                )
+                raise ToolError(f"Error executing tool {name}: {error}") from error
+        return await super().call_tool(name, arguments, context)
+
+
+@asynccontextmanager
+async def _lifespan(server: MCPServer[None]) -> AsyncIterator[None]:
+    """Close the pooled forum client when the server stops serving. MCPServer enters this
+    once per run of the stdio transport, and once per in-process client connection, in the
+    event loop that served the requests."""
+    try:
+        yield
+    finally:
+        await http_client._aclose_client()
+
+
+# What a host reads, on either era, to decide when to reach for this server and which tool to
+# start with, plus the link-to-value summary for hosts that show these instructions but not each
+# parameter's description; each tool's own description carries the detail.
+_INSTRUCTIONS = (
+    "Use these read-only tools to research LessWrong and the Alignment Forum: posts, comments, "
+    "authors, tags and sequences on rationality and AI alignment. The two forums run on one "
+    "backend, so lw_search covers both at once; the other tools take a `site` to choose which "
+    "forum's view they return. Start with lw_search to discover content, fetch a post's full "
+    "text with lw_get_post (and its discussion with lw_get_comments), and use lw_filter_posts "
+    "for precise listings by author, tag, date range or karma in an explicit sort order. "
+    "Results link what they mention as /<kind>/<value> (/api/post/<id>, /users/<slug>, "
+    "/w/<slug>, /s/<id>); pass that value alone, never the link or its ?query. In "
+    "/posts/<id>/<slug> and /s/<seq>/p/<id> the post is the <id>. A comment link "
+    "(/api/post/<post>/comments/<cid>, or a pasted post link with /comment/<cid>, "
+    "?commentId=<cid> or #<cid>, a 17-character id) is "
+    "lw_get_comments(id_or_slug=<post>, comment_id=<cid>)."
+)
+
+# The tool set is fixed and the server has no resources or prompts, so it serves no
+# subscriptions: no era advertises a list that can change or a resource to subscribe to.
+mcp = LessWrongServer(
+    "lesswrong_mcp",
+    version=__version__,
+    instructions=_INSTRUCTIONS,
+    log_level=LOG_LEVEL,
+    lifespan=_lifespan,
+    subscriptions=False,
+)
+
+
+# --------------------------------------------------------------------------- #
+# Tool registration
+# --------------------------------------------------------------------------- #
+
+def lw_tool(
+    name: str,
+    title: str,
+    *,
+    not_found: Kind | None = None,
+    id_param: str | None = None,
+) -> Callable[[_Tool[_P]], _Tool[_P]]:
+    """Register a coroutine as a read-only tool on `mcp`; every tool goes through here.
+
+    MCPServer registers exactly the callable it is handed, so the `_tool_errors` funnel is
+    applied first and the funnelled function is what gets registered (and returned). The
+    description is the docstring through `inspect.cleandoc`, so it reads the same on every
+    Python (3.13+ dedents docstrings when compiling them; earlier versions keep the source
+    indentation). Auto structured output is off: the tools return Markdown text, which a
+    `{result: str}` structuredContent would only duplicate on the wire.
+    """
+    def register(fn: _Tool[_P]) -> _Tool[_P]:
+        wrapped = _tool_errors(fn, not_found=not_found, id_param=id_param)
+        mcp.tool(
+            name=name,
+            annotations=_readonly_annotations(title),
+            description=inspect.cleandoc(fn.__doc__ or ""),
+            structured_output=False,
+        )(wrapped)
+        return wrapped
+
+    return register

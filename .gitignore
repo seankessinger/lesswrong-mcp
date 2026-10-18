@@ -10,8 +10,9 @@ venv/
 build/
 .eggs/
 
-# uv's lockfile — not tracked here: deps are declared in pyproject.toml / requirements.txt,
-# and the uv-runtime bundle resolves them at install time (the v1.0.0 bundle shipped no lock).
+# uv's lockfile is neither tracked nor shipped: each bundle install resolves the newest
+# releases within pyproject.toml's ranges and so picks up dependency fixes without a new
+# release. CI tests both ends of those ranges, on every push and weekly.
 uv.lock
 
 # Build output (the .mcpb is published via GitHub Releases, not committed)

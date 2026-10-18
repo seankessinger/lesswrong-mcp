@@ -10,32 +10,25 @@ from __future__ import annotations
 from collections import OrderedDict
 
 from lesswrong_mcp import http_client
-from lesswrong_mcp.config import _ID_RE
+from lesswrong_mcp.config import Site
 
 # (site, field, value) -> resolved _id. Bounded and LRU-evicted; reset in tests via the
 # autouse fixture in tests/conftest.py so a cached hit can't leak across tests.
-_ID_CACHE: OrderedDict[tuple[str, str, str], str] = OrderedDict()
+_ID_CACHE: OrderedDict[tuple[Site, str, str], str] = OrderedDict()
 _ID_CACHE_MAX = 2048
 
 
 async def _resolve_id(
-    site: str, value: str, *, field: str, selector_type: str, selector_key: str
+    site: Site, value: str, *, field: str, selector_type: str, selector_key: str
 ) -> str | None:
-    """Return a document _id, accepting an _id directly or resolving a slug via GraphQL.
+    """Return the _id of the document whose slug is `value`, or None when no slug matches.
 
     `field` is the query collection ('users'/'tags'), `selector_type` its GraphQL selector
     type ('UserSelector!'), and `selector_key` the slug selector view.
 
-    Slug lookup comes first, falling back to a raw _id only if no slug matches: shape alone
-    can't disambiguate, since a hyphen-free username can be exactly 17 alphanumerics and so
-    collide with the _id shape. Short-circuiting on shape would send an unresolved slug
-    downstream to match nothing.
-
-    A 17-char _id that matches no slug is returned *unverified* — deliberately. Verifying
-    every raw id would cost a round-trip and would reject valid-but-unexposed ids (a
-    deleted/merged user or tag the resolver won't return but whose posts the filter still
-    matches). The cost is that a wrong-collection id yields 'No posts matched those filters.'
-    rather than 'no user/tag found'.
+    The value is looked up as a slug and as nothing else: it is not checked against the _id
+    shape, so a document _id matches no slug and resolves to None like any other unknown
+    value.
     """
     key = (site, field, value)
     cached = _ID_CACHE.get(key)
@@ -49,7 +42,7 @@ async def _resolve_id(
         {"s": {selector_key: {"slug": value}}},
     )
     results = (data.get(field) or {}).get("results") or []
-    resolved = results[0]["_id"] if results else (value if _ID_RE.match(value) else None)
+    resolved = results[0]["_id"] if results else None
 
     if resolved is not None:
         _ID_CACHE[key] = resolved
@@ -58,15 +51,15 @@ async def _resolve_id(
     return resolved
 
 
-async def _resolve_user_id(site: str, author: str) -> str | None:
-    """Return a user's _id. Accepts an _id directly or resolves a profile slug."""
+async def _resolve_user_id(site: Site, author: str) -> str | None:
+    """Resolve a profile slug to a user's _id, or None."""
     return await _resolve_id(
         site, author, field="users", selector_type="UserSelector!", selector_key="usersProfile"
     )
 
 
-async def _resolve_tag_id(site: str, tag: str) -> str | None:
-    """Return a tag's _id. Accepts an _id directly or resolves a tag slug."""
+async def _resolve_tag_id(site: Site, tag: str) -> str | None:
+    """Resolve a tag slug to a tag's _id, or None."""
     return await _resolve_id(
         site, tag, field="tags", selector_type="TagSelector!", selector_key="tagBySlug"
     )
