@@ -1,11 +1,9 @@
 name: CI
 
-# Single-branch, no-PR repo: run on pushes to main, on demand and weekly. No pull_request
-# trigger, since work lands directly on main (see CLAUDE.md "Git workflow"). The weekly run
-# matters because nothing is locked: every bundle install and uvx run resolves the newest
-# dependencies in pyproject.toml's ranges, and the forum's API can change between releases, so
-# the suite re-runs against both when nothing has been pushed. GitHub disables a repository's
-# schedules after 60 days without activity; re-enable them in the Actions tab.
+# Single-branch, no-PR repo: run on pushes to main, on demand and weekly. The weekly run matters
+# because nothing is locked: every bundle install and uvx run resolves the newest dependencies in
+# pyproject.toml's ranges, and the forum's API can change between releases. GitHub disables a
+# repository's schedules after 60 days without activity; re-enable them in the Actions tab.
 on:
   push:
     branches: [main]
@@ -13,75 +11,50 @@ on:
   schedule:
     - cron: "17 6 * * 1"  # Mondays, 06:17 UTC
 
-# Every job only reads the checkout, so the token can read the contents and nothing more,
-# whatever the repository's default.
+# Every job only reads the checkout.
 permissions:
   contents: read
 
 # A newer run of the same kind (push, dispatch or schedule) on the same branch cancels one still
-# in progress there: it covers the latest commit. Keeping the kinds apart means a push never
-# cancels, or is cancelled by, a run that carries the live job.
+# in progress there. Keeping the kinds apart means a push never cancels a run that carries `live`.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
   test:
+    # The two corners that can break: the oldest supported Python with each direct dependency at
+    # the lowest version the set allows (so the declared floors stay honest), and the newest
+    # CPython, the one uv downloads for a Desktop user without a compatible Python, with the
+    # newest dependencies.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      # Every CPython from requires-python = ">=3.11" in pyproject.toml to the newest release,
-      # which is the one uv downloads for a Claude Desktop user who has no compatible Python.
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        include:
+          - { python: "3.11", resolution: "lowest-direct" }
+          - { python: "3.15", resolution: "highest" }
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
 
-      - name: Install package with dev extras
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e '.[dev]'
-
-      - name: Run hermetic tests
-        # LW_LIVE_TESTS is left unset, so the opt-in live-network tests stay skipped and this
-        # job never touches the forum API: the run is deterministic and offline.
-        run: pytest -q
-
-  test-lowest:
-    # The `test` matrix always resolves the newest dependencies, so a declared floor the code
-    # has outgrown passes there unnoticed. Resolve each direct dependency to the lowest version
-    # the whole set allows (lowest-direct) on the oldest supported Python and run the suite
-    # against that: mcp, httpx and pydantic each land on their declared floor.
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-
-      - name: Install package with dev extras at the lowest direct versions
+      - name: Install package with dev extras (${{ matrix.resolution }})
         run: |
           pip install uv
-          uv pip install --system --resolution lowest-direct -e '.[dev]'
+          uv pip install --system --resolution ${{ matrix.resolution }} -e '.[dev]'
 
       - name: Run hermetic tests
+        # LW_LIVE_TESTS is unset, so the live tests are skipped and the run stays offline.
         run: pytest -q
 
   lint:
-    # Runs once, on 3.11. Ruff and mypy take their target version from pyproject.toml
-    # (target-version py311, python_version 3.11), not from the interpreter they run on, so they
-    # check the code as 3.11 code wherever they run and a matrix would repeat that one check. They
-    # do not check it against a newer CPython: a stdlib or typing change from 3.12 onwards is
-    # the `test` matrix's to catch, at runtime.
+    # Ruff and mypy take their target version from pyproject.toml, not the interpreter, so one
+    # run on 3.11 checks the code as 3.11 code.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -104,10 +77,9 @@ jobs:
         run: mypy lesswrong_mcp
 
   bundle:
-    # Packs the .mcpb as a release build does, with the mcpb version the build commands in
-    # README.md and CLAUDE.md pin. `mcpb pack` exits 0 even when .mcpbignore drops the package
-    # or the manifest's entry_point names a file that isn't there, so the last step checks the
-    # archive against the tracked files it must carry.
+    # Packs the .mcpb as a release does, with the mcpb version README.md and CLAUDE.md pin.
+    # `mcpb pack` exits 0 even when .mcpbignore drops the package or entry_point names a missing
+    # file, so the last step checks the archive against the tracked files it must carry.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -127,7 +99,6 @@ jobs:
         run: npx --yes "$MCPB" pack . dist/lesswrong-mcp.mcpb
 
       - name: Check the bundle holds exactly the server
-        # The expected set is every tracked file under the roots .mcpbignore admits.
         run: |
           unzip -Z1 dist/lesswrong-mcp.mcpb | sort > "$RUNNER_TEMP/bundle.txt"
           git ls-files LICENSE manifest.json pyproject.toml lesswrong_mcp | sort > "$RUNNER_TEMP/expected.txt"
@@ -136,8 +107,8 @@ jobs:
           grep -qxF "$entry" "$RUNNER_TEMP/bundle.txt" || { echo "::error::entry_point $entry is not in the bundle"; exit 1; }
 
   live:
-    # The opt-in live tests: read-only requests to the real forum, one at a time. They run on
-    # the weekly schedule and on demand only, so a push never waits on, or fails with, the forum.
+    # The opt-in live tests: read-only requests to the real forum, one at a time, on the weekly
+    # schedule and on demand only, so a push never waits on, or fails with, the forum.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lesswrong-mcp"
-version = "2.0.0"
+version = "3.0.0"
 description = "Read-only MCP server for LessWrong and the Alignment Forum."
 # 3.11 is the oldest CPython still in upstream support: 3.10 reached end of life on 2026-10-01
 # (PEP 619).
@@ -27,14 +27,13 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# httpx and pydantic are imported directly (the pooled forum client; Field, the validators,
-# ValidationError, and PydanticCustomError from pydantic_core, which pydantic pins), so declare
-# them explicitly rather than leaning on mcp's transitive tree, which carries httpx2 rather than
-# httpx. Upper caps guard against a future major relocating the APIs used here. Each floor is
-# the version CI's test-lowest job installs: mcp 2.3.0 is the first release that honours
-# MCPServer(subscriptions=False) and omits the empty `experimental` capability, and it is past
-# every published 2.x advisory; pydantic 2.12 is the lowest release mcp accepts. This is the
-# only dependency list.
+# httpx and pydantic are imported directly (the pooled forum client; Field and the validators,
+# with PydanticCustomError from pydantic_core, which pydantic pins), so declare them explicitly
+# rather than leaning on mcp's transitive tree. Upper caps guard against a future major
+# relocating the APIs used here. Each floor is the version CI's lowest-dependency corner
+# installs: mcp 2.3.0 is the first release that honours MCPServer(subscriptions=False) and
+# omits the empty `experimental` capability, and it is past every published 2.x advisory;
+# pydantic 2.12 is the lowest release mcp accepts. This is the only dependency list.
 dependencies = [
     "mcp>=2.3.0,<3",
     "httpx>=0.27,<1",
@@ -50,13 +49,10 @@ Issues = "https://github.com/seankessinger/lesswrong-mcp/issues"
 # Test + lint deps. The suite drives the async tool handlers with asyncio.run(), so no
 # pytest-asyncio plugin is needed. Run with:  pytest  /  ruff check .  /  mypy lesswrong_mcp
 # The opt-in live-endpoint tests hit the real API and are skipped unless LW_LIVE_TESTS=1.
-# jsonschema is imported directly by the schema tests, so it is declared rather than left to
-# mcp's transitive tree.
-dev = ["pytest>=8", "jsonschema>=4", "ruff>=0.6", "mypy>=1.8"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.8"]
 
-# Console-script entry point. `python -m lesswrong_mcp` (via lesswrong_mcp/__main__.py) is the
-# other supported launcher; both call the same main(). It names the package's public `main`
-# rather than lesswrong_mcp.cli.main, so it depends only on the public surface.
+# Console-script entry point. `python -m lesswrong_mcp` is the other supported launcher; both
+# call the package's main().
 [project.scripts]
 lesswrong-mcp = "lesswrong_mcp:main"
 
@@ -67,11 +63,9 @@ lesswrong-mcp = "lesswrong_mcp:main"
 packages = ["lesswrong_mcp"]
 
 [tool.pytest.ini_options]
-# Tests live in tests/; add the repo root to sys.path so `import lesswrong_mcp` resolves
-# whether or not the package is pip-installed (the local run imports it straight from the
-# source tree, CI runs against the editable install — both work).
+# Tests run against the installed package (`pip install -e '.[dev]'`), whose metadata carries
+# the version the server reports.
 testpaths = ["tests"]
-pythonpath = ["."]
 # A misspelt marker is an error, not a silently unmarked test: `live` decides whether a test
 # may reach the real forum (tests/conftest.py gates it on LW_LIVE_TESTS).
 addopts = ["--strict-markers"]
@@ -82,8 +76,8 @@ markers = ["live: reaches the real forum API; runs only with LW_LIVE_TESTS=1"]
 # today: ruff 0.16 widened its defaults to ~400 rules, which silently switched on checks this
 # repo deliberately does not want — notably I (import ordering: the import blocks here are
 # grouped by meaning, not alphabetised) and TRY004 (it wants a TypeError after an isinstance
-# check, but the shape checks in http_client._graphql must raise ForumAPIError to reach the
-# _tool_errors funnel). CI installs the newest ruff, so an unpinned selection breaks the lint
+# check, but the shape checks in forum.graphql must raise ForumError to reach the tool error
+# funnel). CI installs the newest ruff, so an unpinned selection breaks the lint
 # job on a release that has nothing to do with this code. E501 stays out of the selection —
 # the tool docstrings / Field descriptions are intentionally long single lines — so
 # line-length is configured for the formatter's benefit but not enforced as a lint error.

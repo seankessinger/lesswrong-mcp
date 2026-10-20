@@ -1,116 +1,120 @@
-"""Opt-in smoke tests against the real forum, and the gate that decides when they run.
-
-The smoke tests make one request per Markdown route, using the example ids the tool
-descriptions advertise, and check the upstream wording the tools parse. They are marked
-`live`, so they run only with LW_LIVE_TESTS=1; the gate test itself is hermetic.
-
-Live: LW_LIVE_TESTS=1 pytest tests/test_live.py -m live
-"""
+"""Opt-in live checks against the real forum (LW_LIVE_TESTS=1): one call per route and GraphQL
+view the tools use, since the GraphQL schema is internal and unversioned. Each asserts the
+shape of what comes back, and that every post link the server renders carries an id.
+Read-only, one request at a time."""
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from datetime import date
 
 import pytest
 
-import lesswrong_mcp as m
-from lesswrong_mcp import tools
+from lesswrong_mcp import forum, tools
 
-pytest_plugins = ["pytester"]
+pytestmark = pytest.mark.live
 
-# The post links the Markdown routes emit; the value after /api/post/ is what lw_get_post takes.
-# Search results carry the 17-char _id; other pages, such as a user profile, link posts by slug.
-_POST_ID_LINK = re.compile(r"/api/post/[A-Za-z0-9]{17}(?![\w-])")
-_POST_LINK = re.compile(r"/api/post/[\w-]+")
-
-
-# ------------------------------------------------------------------------- #
-# The LW_LIVE_TESTS gate
-# ------------------------------------------------------------------------- #
-
-@pytest.mark.parametrize(("value", "outcome"), [
-    (None, "skipped"), ("0", "skipped"), ("false", "skipped"),
-    ("1", "passed"), ("true", "passed"), (" Yes ", "passed"),
-])
-def test_live_marker_runs_only_on_an_explicit_yes(pytester, monkeypatch, value, outcome):
-    if value is None:
-        monkeypatch.delenv("LW_LIVE_TESTS", raising=False)
-    else:
-        monkeypatch.setenv("LW_LIVE_TESTS", value)
-    pytester.makeconftest(Path(__file__).with_name("conftest.py").read_text())
-    pytester.makeini("[pytest]\nmarkers =\n    live: reaches the real forum API\n")
-    pytester.makepyfile("import pytest\n\n@pytest.mark.live\ndef test_marked():\n    pass\n")
-    # The gate is read when the conftest is imported, and each run imports its own copy.
-    result = pytester.runpytest("-p", "no:cacheprovider")
-    result.assert_outcomes(**{outcome: 1})
+POST = "HBxe6wdjxK239zajf"       # Paul Christiano, "What failure looks like" (2019)
+COMMENT = "CB8ieALcHfSSuAYYJ"    # Wei Dai's top-level comment on that post
+QUESTION = "dKTh9Td3KaJ8QW6gw"   # "why assume AGIs will optimize for fixed goals?", a question post
+SEQUENCE = "Rm6oQRJJmhGCcLvxh"   # "Embedded Agency"
 
 
-# ------------------------------------------------------------------------- #
-# Smoke tests (network)
-# ------------------------------------------------------------------------- #
-
-@pytest.mark.live
-@pytest.mark.parametrize("call", [
-    lambda: m.lw_get_post("RuGZ5tMdqpnraJahJ", max_chars=2000),
-    lambda: m.lw_get_comments("RuGZ5tMdqpnraJahJ", limit=3, max_chars=2000),
-    lambda: m.lw_get_user("cleo-nardo"),
-    lambda: m.lw_get_tag("mesa-optimization"),
-    lambda: m.lw_list_feed(feed="curated", limit=3),
-], ids=["post", "comments", "user", "tag", "feed"])
-def test_live_route_answers(call, live_run):
-    # A failure raises ToolError, so any returned text means the route answered.
-    assert live_run(call()).strip()
+def links_carry_ids(text: str) -> None:
+    for value in re.findall(r"/api/post/([^/)\s]+)", text):
+        assert re.fullmatch(r"[A-Za-z0-9]{17}", value), value
 
 
-@pytest.mark.live
-def test_live_sequence_lists_post_links(live_run):
-    # Each chapter post is linked under /api/post/; the segment after it is what lw_get_post takes.
-    assert _POST_LINK.search(live_run(m.lw_get_sequence("r9tYkB2a8Fp4DN8yB")))
+def test_markdown_post_route(live_run):
+    text = live_run(tools.lw_get_post(POST))
+    assert "What failure looks like" in text and len(text) > 1000
 
 
-@pytest.mark.live
-def test_live_comment_id_fetches_just_that_comment(live_run):
-    # comment_id reaches the single-comment route, which renders the one comment under its
-    # post's title and links it by its own id.
-    out = live_run(m.lw_get_comments(
-        "RuGZ5tMdqpnraJahJ", comment_id="gFNHPK6oXtcuZfSWm",
-    ))
-    assert out.startswith("# Comment on ")
-    assert out.count("### Comment by ") == 1
-    assert "/comments/gFNHPK6oXtcuZfSWm" in out
+@pytest.mark.parametrize("sort", ["top", "new", "old"])
+def test_posts_views(live_run, sort):
+    text = live_run(tools.lw_filter_posts(author="paulfchristiano", sort=sort, limit=3))
+    assert text.startswith("# Posts (3)") and f"sort={sort}" in text
+    links_carry_ids(text)
 
 
-@pytest.mark.live
-def test_live_user_search_links_each_account_by_slug(live_run):
-    # A user miss sends the caller to this search for the slug, so each result must link it.
-    out = live_run(m.lw_search("cleo nardo", content_type="users", limit=1))
-    assert re.search(r"\]\(/api/user/[A-Za-z0-9_-]+\)", out), out[:500]
+def test_pingback_view_with_date_filter(live_run):
+    text = live_run(tools.lw_filter_posts(links_to=POST, after=date(2020, 1, 1), limit=5))
+    assert f"links to {POST} — " in text and text.count("\n- [") == 5
+    links_carry_ids(text)
 
 
-@pytest.mark.live
-def test_live_typed_search_keeps_the_wording_the_tool_parses(live_run):
-    out = live_run(m.lw_search("mesa optimization", content_type="posts", limit=1))
-    assert "- Results for posts:" in out          # relabelled from "- Results across all types:"
-    assert tools._SEARCH_TOTAL_RE.search(out)     # the per-type total behind the next-page hint
-    assert _POST_ID_LINK.search(out)              # the post id lw_search promises
+@pytest.mark.parametrize("sort", ["top", "new", "old"])
+def test_thread_views(live_run, sort):
+    async def whole_thread() -> str:
+        pages, offset = [], 0
+        while True:
+            page = await tools.lw_get_comments(POST, sort=sort, offset=offset)
+            pages.append(page)
+            match = re.search(r"call again with offset=(\d+)", page)
+            if not match:
+                return "\n".join(pages)
+            offset = int(match.group(1))
+
+    text = live_run(whole_thread())
+    assert text.startswith("# Comments on [What failure looks like]") and "complete" in text.splitlines()[2]
+    assert COMMENT in text
+    links_carry_ids(text)
 
 
-@pytest.mark.live
-def test_live_search_links_name_values_the_tools_take(live_run):
-    # The tag and sequence advice sends the caller to a search whose results link /api/tag/<slug>
-    # and /api/sequence/<id>, and every link's value is what the tools' identifier pattern takes
-    # once a ?query is dropped. A comment hit links /api/post/<slug>/comments/<cid>, which names
-    # two values, each checked. Only a Markdown link target counts, so a snippet whose prose
-    # mentions an /api/ path is not read as a link. The query is one whose first page of results
-    # has a tag and a sequence section.
-    query = "rationality"
-    out = live_run(m.lw_search(query, limit=3))
-    kinds = set()
-    for kind, target in re.findall(r"\]\((?:https?://[^/)]+)?/api/(post|user|tag|sequence)/([^)\s]+)\)", out):
-        values = target.split("?", 1)[0].split("/comments/")
-        if kind != "post" and len(values) > 1:
-            continue  # a comment on a tag page: no tool fetches it
-        for value in values:
-            assert re.fullmatch("^[A-Za-z0-9_-]+$", value), f"/api/{kind}/{target}"
-        kinds.add(kind)
-    assert {"tag", "sequence"} <= kinds, out[:1500]
+def test_answers_and_replies_on_question_post(live_run):
+    text = live_run(tools.lw_get_comments(QUESTION))
+    assert "## Answers" in text and "Answers: " in text
+    links_carry_ids(text)
+
+
+def test_comment_by_id(live_run):
+    text = live_run(tools.lw_get_comments(POST, comment_id=COMMENT))
+    assert text.startswith(f"### [{COMMENT}](https://www.lesswrong.com/api/post/{POST}/comments/{COMMENT})")
+    assert "(wei-dai)" in text.splitlines()[0]
+
+
+def test_post_by_id_and_unknown_id_is_null(live_run):
+    query = "query ($id: String) { post(input: {selector: {_id: $id}, allowNull: true}) { result { _id slug } } }"
+    found = live_run(forum.graphql(query, {"id": POST}))
+    missing = live_run(forum.graphql(query, {"id": "AAAAAAAAAAAAAAAAA"}))
+    assert found["post"]["result"]["_id"] == POST and missing["post"]["result"] is None
+
+
+def test_sequence_with_chapters(live_run):
+    text = live_run(tools.lw_get_sequence(SEQUENCE))
+    assert text.startswith("# Embedded Agency") and "\n1. [" in text
+    links_carry_ids(text)
+
+
+def test_user_and_tag_slug_lookups(live_run):
+    assert re.fullmatch(r"[A-Za-z0-9]{17}", live_run(tools._resolve("user", "paulfchristiano")))
+    assert re.fullmatch(r"[A-Za-z0-9]{17}", live_run(tools._resolve("tag", "inner-alignment")))
+
+
+def test_search_oldest_first(live_run):
+    text = live_run(tools.lw_search('"embedded agency"', types=["posts"], sort="oldest", limit=3))
+    days = re.findall(r"· (\d{4}-\d{2}-\d{2})", text)
+    assert "## Posts (" in text and days == sorted(days) and len(days) == 3
+    links_carry_ids(text)
+
+
+def test_search_in_one_post(live_run):
+    text = live_run(tools.lw_search("influence", in_post=POST))
+    assert "## Comments (" in text and f"/api/post/{POST}/comments/" in text
+    links_carry_ids(text)
+
+
+def test_search_all_kinds(live_run):
+    text = live_run(tools.lw_search("embedded agency", limit=2))
+    for section in ("Posts", "Comments", "Tags", "Users", "Sequences"):
+        assert f"## {section} (" in text
+    links_carry_ids(text)
+
+
+def test_search_date_and_alignment_forum_filters_apply(live_run):
+    day = date(2023, 3, 14)
+    text = live_run(tools.lw_search("alignment", types=["posts"], after=day, before=day, limit=10))
+    days = re.findall(r"^- \[.*· (\d{4}-\d{2}-\d{2})(?: · AF)?$", text, re.M)
+    assert days and set(days) == {"2023-03-14"}
+    text = live_run(tools.lw_search("interpretability", types=["posts"], af_only=True, limit=10))
+    rows = [line for line in text.splitlines() if line.startswith("- [")]
+    assert rows and all(line.endswith(" · AF") for line in rows)
