@@ -46,7 +46,11 @@ WHAT: dict[Kind, str] = {
     "tag": "tag slug",
 }
 
-SHAPE: dict[Kind, str] = {kind: f"takes a bare {WHAT[kind]}, not a link. {FIND[kind]}" for kind in FIND}
+# What a value that misses its pattern most likely was instead. A post's slug is a value of its
+# own, not its id.
+NOT: dict[Kind, str] = {kind: "a link or name" for kind in FIND} | {"post": "a link, name or slug"}
+
+SHAPE: dict[Kind, str] = {kind: f"takes a bare {WHAT[kind]}, not {NOT[kind]}. {FIND[kind]}" for kind in FIND}
 
 ID = r"^[A-Za-z0-9]{17}$"
 SLUG = r"^[A-Za-z0-9_-]+$"

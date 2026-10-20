@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "lesswrong-mcp",
   "display_name": "LessWrong & Alignment Forum",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Read-only search and retrieval for LessWrong and the Alignment Forum.",
   "long_description": "Research LessWrong and the Alignment Forum through five read-only tools: search posts, comments, tags, users and sequences, sorted by relevance, date or karma and filtered by date range, Alignment Forum status or one post's discussion; read a post; read a post's whole discussion, answers on question posts included, or one comment; list posts by author, tag, date range and karma, or the posts that link to a post; and read a sequence in order. Both forums share one backend; no authentication required.",
   "author": { "name": "Sean Kessinger" },

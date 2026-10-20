@@ -16,8 +16,8 @@ def manifest() -> dict:
     return json.loads((ROOT / "manifest.json").read_text())
 
 
-def test_version_is_3_0_0_in_pyproject_and_manifest():
-    assert pyproject()["project"]["version"] == manifest()["version"] == "3.0.0"
+def test_version_matches_in_pyproject_and_manifest():
+    assert pyproject()["project"]["version"] == manifest()["version"]
 
 
 def test_display_name_has_no_slash():

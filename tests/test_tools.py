@@ -47,6 +47,19 @@ def test_link_refused_with_shape_advice(call_tool, fake_forum):
     assert res.is_error and SHAPE["post"] in text(res) and seen == []
 
 
+def test_shape_advice_names_what_the_value_is_not(call_tool, fake_forum):
+    seen = fake_forum(lambda r: httpx.Response(200, text="unused"))
+    for name, args, advice in [
+        ("lw_get_post", {"post_id": "some-slug"}, "takes a bare 17-character post _id, not a link, name or slug."),
+        ("lw_get_sequence", {"sequence_id": "Embedded Agency"}, "takes a bare 17-character sequence _id, not a link or name."),
+        ("lw_filter_posts", {"author": "Ada Lovelace"}, "takes a bare user slug, not a link or name."),
+        ("lw_filter_posts", {"tags": ["AI Safety"]}, "takes a bare tag slug, not a link or name."),
+    ]:
+        res = call_tool(name, args)
+        assert res.is_error and advice in text(res), (name, args)
+    assert seen == []
+
+
 def test_429_and_500_read_as_forum_messages(call_tool, fake_forum):
     # A Retry-After past the cap ends the call at once, so the test never sleeps.
     fake_forum(lambda r: httpx.Response(429, headers={"Retry-After": "120"}))
@@ -130,6 +143,14 @@ def test_comment_on_other_post_is_refused(call_tool, fake_forum):
     assert res.is_error and C1 in text(res) and P1 in text(res) and FIND["comment"] in text(res)
 
 
+def test_comment_on_a_tag_page_is_refused_as_such(call_tool, fake_forum):
+    # The forum keeps a tag page's discussion as comments with no post.
+    fake_forum(gql({"comment": {"result": comment(C1, post=None)}}))
+    res = call_tool("lw_get_comments", {"post_id": P1, "comment_id": C1})
+    assert res.is_error and "None" not in text(res)
+    assert f"comment '{C1}' is on a tag page, not a post; the tools read only comments on posts." in text(res)
+
+
 def test_unknown_comment_is_miss(call_tool, fake_forum):
     fake_forum(gql({"comment": {"result": None}}))
     res = call_tool("lw_get_comments", {"post_id": P1, "comment_id": C1})
@@ -152,6 +173,15 @@ def test_long_thread_slices_and_offset_reconstructs_it(call_tool, fake_forum):
             break
         offset = int(page.rsplit("offset=", 1)[1].split()[0])
     assert len(pages) > 1 and "".join(pages) == full
+
+
+def test_comments_description_names_the_cap_the_header_reports(listed_tool):
+    from lesswrong_mcp.tools import THREAD_LIMIT
+    description = " ".join(listed_tool("lw_get_comments").description.split())
+    assert "always complete" not in description
+    # Each section (answers, comments) is one read capped at THREAD_LIMIT.
+    assert f"its answers or its comments, replies included, reach {THREAD_LIMIT:,}" in description
+    assert '"showing the first N"' in description
 
 
 def test_comments_schema_has_no_limit_or_site(tool_schema):
@@ -204,6 +234,34 @@ def test_af_only_facet(call_tool, fake_forum):
     call_tool("lw_search", {"query": "qq", "types": ["comments", "users"], "af_only": True})
     comments, users = sent(seen)
     assert comments["params"]["facetFilters"] == [["af:true"]] and "facetFilters" not in users["params"]
+
+
+def notes(page: str) -> list[str]:
+    """The note lines under a search page's heading."""
+    return page.split("\n\n## ", 1)[0].splitlines()[2:]
+
+
+def test_search_filter_note_names_only_the_filters_given(call_tool, fake_forum):
+    search_forum(fake_forum)
+    assert notes(text(call_tool("lw_search", {"query": "qq", "af_only": True}))) == [
+        "- Posts and comments only on the Alignment Forum."]
+    assert notes(text(call_tool("lw_search", {"query": "qq", "before": "2024-05-01"}))) == [
+        "- Posts and comments only from any day to 2024-05-01."]
+    assert notes(text(call_tool("lw_search", {"query": "qq", "after": "2024-01-01", "af_only": True}))) == [
+        "- Posts and comments only from 2024-01-01 to today and on the Alignment Forum."]
+    assert notes(text(call_tool("lw_search", {"query": "qq"}))) == []
+
+
+def test_search_notes_with_mixed_types_and_the_other_kinds_unfiltered(call_tool, fake_forum):
+    seen = search_forum(fake_forum)
+    out = text(call_tool("lw_search", {"query": "qq", "types": ["users", "posts"], "sort": "newest",
+                                       "after": "2024-01-01", "af_only": True}))
+    assert notes(out) == ["- Sort: newest (posts and comments).",
+                          "- Posts and comments only from 2024-01-01 to today and on the Alignment Forum."]
+    posts, users = sent(seen)
+    assert posts["indexName"] == "posts_newest_first" and posts["params"]["facetFilters"] == [["af:true"]]
+    assert users == {"indexName": "users", "params": {"query": "qq", "hitsPerPage": 10, "page": 0}}
+    assert "## Posts (1 total)" in out and "## Users (1 total)" in out
 
 
 def test_in_post_resolves_slug_filters_hits_and_forces_comments(call_tool, fake_forum):
@@ -343,6 +401,28 @@ def test_min_karma_zero_drops_negative_rows(call_tool, fake_forum):
     assert posts_request(seen)["variables"]["s"]["top"]["karmaThreshold"] == 0
 
 
+def test_min_karma_in_karma_order_offers_no_page_that_cannot_match(call_tool, fake_forum):
+    # In karma order, a next post below min_karma means every later post is below it too.
+    filter_forum(fake_forum, rows=[row(n, karma=10) for n in range(5)] + [row(n, karma=-1) for n in range(5, 21)])
+    out = text(call_tool("lw_filter_posts", {"min_karma": 0}))
+    assert out.startswith("# Posts (5)") and "More" not in out
+    # The next post decides, not this page's last one.
+    filter_forum(fake_forum, rows=[row(n, karma=10) for n in range(20)] + [row(20, karma=-1)])
+    out = text(call_tool("lw_filter_posts", {"min_karma": 0}))
+    assert out.startswith("# Posts (20)") and "More" not in out
+    filter_forum(fake_forum, rows=[row(n, karma=10) for n in range(21)])
+    assert text(call_tool("lw_filter_posts", {"min_karma": 0})).endswith("[More: call again with offset=20.]")
+    filter_forum(fake_forum, rows=[row(n, karma=-1) for n in range(21)])
+    assert text(call_tool("lw_filter_posts", {"min_karma": 0, "offset": 20})) == "No posts matched those filters."
+    assert text(call_tool("lw_filter_posts", {"links_to": P1, "min_karma": 0})) == "No posts matched those filters."
+
+
+def test_min_karma_in_date_order_says_a_filtered_page_is_not_the_end(call_tool, fake_forum):
+    filter_forum(fake_forum, rows=[row(n, karma=-1) for n in range(21)])
+    out = text(call_tool("lw_filter_posts", {"min_karma": 0, "sort": "new"}))
+    assert out.startswith("No posts on this page matched those filters.") and "call again with offset=20" in out
+
+
 def test_footer_more_and_cap(call_tool, fake_forum):
     filter_forum(fake_forum, rows=[row(n) for n in range(21)])
     assert "call again with offset=20" in text(call_tool("lw_filter_posts", {}))
@@ -350,6 +430,20 @@ def test_footer_more_and_cap(call_tool, fake_forum):
     assert "past the paging cap" in text(call_tool("lw_filter_posts", {"offset": 2000}))
     filter_forum(fake_forum)
     assert "No posts matched those filters." in text(call_tool("lw_filter_posts", {}))
+
+
+def test_footer_says_the_next_page_repeats_rows_when_the_cap_moves_it_back(call_tool, fake_forum):
+    filter_forum(fake_forum, rows=[row(n) for n in range(21)])
+    assert text(call_tool("lw_filter_posts", {"offset": 1990})).endswith(
+        "[More: call again with offset=2000. Offset stops at 2000, so that page starts with this page's"
+        " last 10 posts.]")
+    assert text(call_tool("lw_filter_posts", {"offset": 1981})).endswith("starts with this page's last post.]")
+    assert text(call_tool("lw_filter_posts", {"offset": 1980})).endswith("[More: call again with offset=2000.]")
+    assert text(call_tool("lw_filter_posts", {})).endswith("[More: call again with offset=20.]")
+    # Only rows this page shows can repeat: min_karma hides two of the ten that overlap.
+    filter_forum(fake_forum, rows=[row(n, karma=-1 if n in (12, 13) else 10) for n in range(21)])
+    assert text(call_tool("lw_filter_posts", {"offset": 1990, "sort": "new", "min_karma": 0})).endswith(
+        "starts with this page's last 8 posts.]")
 
 
 # --------------------------------------------------------------------------- lw_get_sequence

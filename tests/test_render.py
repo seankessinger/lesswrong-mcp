@@ -31,7 +31,7 @@ def hits() -> dict[str, dict]:
                      "authorSlug": "c-d", "baseScore": 2, "postedAt": "2021-03-04T00:00:00Z",
                      "af": False, "_snippetResult": snippet},
         "tags": {"_id": "tag00000000000001", "name": "AI", "slug": "ai",
-                 "_snippetResult": {"description": {"value": "about <b>AI</b>"}}},
+                 "_snippetResult": {"description": {"value": "about <em>AI</em>"}}},
         "users": {"_id": "usr00000000000001", "displayName": "E F", "slug": "e-f", "karma": 900},
         "sequences": {"_id": S1, "title": "Series", "plaintextDescription": "a series"},
     }
@@ -76,10 +76,30 @@ def test_comment_hit_on_tag_page_links_tag_not_post():
     assert f"{SITE}/w/t" in line and "/api/post/" not in line and C1 in line
 
 
-def test_snippet_html_stripped_and_trimmed_to_300():
+def test_hit_without_a_slug_is_named_unlinked_and_an_odd_date_reads_undated():
+    h = hits()
+    assert hit_line("users", {"_id": "usr00000000000001", "displayName": "E F", "karma": 3}) == "- E F · karma 3"
+    assert hit_line("tags", {"_id": "tag00000000000001", "name": "AI"}) == "- AI"
+    on_tag = hit_line("comments", {**h["comments"], "postId": None, "tagSlug": None})
+    assert f"- Comment {C1} by C D (c-d) on a tag page · karma 2" in on_tag and "/w/" not in on_tag
+    for posted in (None, 1714521600000):
+        assert " · karma 5 · undated · AF" in hit_line("posts", {**h["posts"], "postedAt": posted})
+
+
+def test_snippet_highlight_stripped_and_trimmed_to_300():
     hit = {**hits()["posts"], "_snippetResult": {"body": {"value": "<em>x</em> " + "y" * 500}}}
     snippet = hit_line("posts", hit).split("\n  snippet: ", 1)[1]
     assert "<em>" not in snippet and len(snippet) <= 301
+
+
+def test_snippet_drops_highlight_tags_in_place_and_unescapes_entities():
+    # The index marks matches with <em> inside the text, even mid-word or mid-entity; any other
+    # angle bracket is the text's own, and so is an ampersand that ends no entity.
+    raw = ("AT&<em>T</em> and&<em>nbsp</em>;so &amp; &#8212; &#x2014; on, where $i < 10 > 2 and <p> stays:"
+           " ?a=1&region=us&copy=2, p = &params;")
+    hit = {**hits()["posts"], "_snippetResult": {"body": {"value": raw}}}
+    assert hit_line("posts", hit).split("\n  snippet: ", 1)[1] == (
+        "AT&T and so & \u2014 \u2014 on, where $i < 10 > 2 and <p> stays: ?a=1&region=us&copy=2, p = &params;")
 
 
 def test_every_api_post_link_carries_an_id():
@@ -161,6 +181,12 @@ def test_comment_item_header_fields_and_omissions():
     assert "agree" not in plain and "[deleted account]" in plain and plain.endswith("[deleted]")
 
 
+def test_agreement_shown_only_when_the_score_has_one():
+    header = comment_item(a_comment(C1, extendedScore={"approvalVoteCount": 3}), P1).splitlines()[0]
+    assert header.endswith(" · karma 1")
+    assert comment_item(a_comment(C1, extendedScore={"agreement": 0}), P1).splitlines()[0].endswith(" · agree 0")
+
+
 # --------------------------------------------------------------------------- sequences
 
 def test_sequence_renders_chapters_with_id_rows():
@@ -172,6 +198,32 @@ def test_sequence_renders_chapters_with_id_rows():
     assert text.startswith("# Series\n\nby A B (a-b)\n\nWhat it covers.")
     assert "## Part 1" in text and text.count("## ") == 1
     assert f"1. [T]({SITE}/api/post/{P1})" in text and f"3. [T]({SITE}/api/post/post0000000000003)" in text
+
+
+def test_sequence_chapters_follow_their_number_not_the_response_order():
+    seq = {"_id": S1, "title": "Series", "user": None, "contents": None,
+           "chapters": [{"title": "Second", "number": 2, "posts": [a_post(_id="post0000000000002")]},
+                        {"title": "First", "number": 1, "posts": [a_post()]}]}
+    text = sequence(seq)
+    assert text.index("## First") < text.index("## Second")
+    assert f"1. [T]({SITE}/api/post/{P1})" in text and f"2. [T]({SITE}/api/post/post0000000000002)" in text
+
+
+def test_sequence_with_null_fields_renders_what_it_has():
+    assert sequence({"_id": S1, "title": None, "user": None, "contents": None, "chapters": None}) == (
+        "# (untitled)\n\nby [deleted account]")
+    p2 = "post0000000000002"
+    seq = {"_id": S1, "title": "Series", "user": None, "contents": {"markdown": None},
+           "chapters": [None,
+                        {"title": None, "number": 0, "posts": [a_post()]},
+                        {"title": None, "number": None, "posts": [None, a_post(_id=p2)]},
+                        {"title": "Part 1", "number": 1, "posts": None}]}
+    text = sequence(seq)
+    # A chapter without a number comes first, as on the forum (an untitled preface), then the
+    # numbered ones in order.
+    assert text.count("## ") == 1
+    assert (text.index(f"1. [T]({SITE}/api/post/{p2})") < text.index(f"2. [T]({SITE}/api/post/{P1})")
+            < text.index("## Part 1"))
 
 
 # --------------------------------------------------------------------------- search page

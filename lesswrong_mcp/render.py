@@ -7,7 +7,9 @@ items "AF".
 """
 from __future__ import annotations
 
+import html
 import re
+from html.entities import html5
 from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -15,6 +17,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 # The host links point at. forum.BASE is the host requests go to; it is the same site.
 SITE = "https://www.lesswrong.com"
 SNIPPET_CHARS = 300
+# Something shaped like a character reference. html.unescape alone would also decode the start
+# of plain text that begins like one, such as "&copy" in a query string or "&para" in "&params;".
+_ENTITY = re.compile(r"&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#[xX][0-9A-Fa-f]+);")
 
 
 def md_inline(text: str | None) -> str:
@@ -32,9 +37,9 @@ def user_label(user: dict[str, Any] | None) -> str:
     return f"{name} ({user['slug']})" if user.get("slug") else name
 
 
-def day(iso: str | None) -> str:
-    """The UTC day of an ISO timestamp."""
-    return iso[:10] if iso else "undated"
+def day(iso: Any) -> str:
+    """The UTC day of an ISO timestamp; anything else reads "undated"."""
+    return iso[:10] if isinstance(iso, str) and iso else "undated"
 
 
 def af_mark(item: dict[str, Any]) -> str:
@@ -51,10 +56,19 @@ def post_row(p: dict[str, Any]) -> str:
     )
 
 
+def _decode(ref: re.Match[str]) -> str:
+    """A numeric reference, or a named one HTML defines, decoded; anything else as written."""
+    return html.unescape(ref[0]) if ref[0][1] == "#" or ref[0][1:] in html5 else ref[0]
+
+
 def _snippet(hit: dict[str, Any], field: str, fallback: str | None = None) -> str:
-    """The hit's highlighted snippet as plain text, trimmed to SNIPPET_CHARS."""
+    """The hit's highlighted snippet as plain text, trimmed to SNIPPET_CHARS. The index marks
+    matches with <em> tags, even inside a word or an entity, so only those go, and nothing
+    takes their place; any other angle bracket is the text's own. Then each character reference
+    HTML defines is decoded."""
     raw = ((hit.get("_snippetResult") or {}).get(field) or {}).get("value") or fallback or ""
-    text = " ".join(re.sub(r"<[^>]+>", " ", raw).split())
+    text = _ENTITY.sub(_decode, re.sub(r"</?em>", "", raw))
+    text = " ".join(text.split())
     return text if len(text) <= SNIPPET_CHARS else text[:SNIPPET_CHARS].rstrip() + "…"
 
 
@@ -74,15 +88,18 @@ def hit_line(kind: str, hit: dict[str, Any]) -> str:
             where = (f"[{cid}]({SITE}/api/post/{post_id}/comments/{cid}) by {author} on "
                      f"[{md_inline(hit.get('postTitle')) or '(untitled)'}]({SITE}/api/post/{post_id})")
         else:  # a comment on a tag page: no tool reads those, so there is no fetch link
-            tag = hit.get("tagSlug") or ""
-            where = f"{cid} by {author} on tag [{md_inline(tag)}]({SITE}/w/{tag})"
+            tag = hit.get("tagSlug")
+            where = f"{cid} by {author} on " + (f"tag [{md_inline(tag)}]({SITE}/w/{tag})" if tag else "a tag page")
         line = f"- Comment {where} · karma {hit.get('baseScore') or 0} · {day(hit.get('postedAt'))}{af_mark(hit)}"
         snippet = _snippet(hit, "body")
     elif kind == "tags":
-        line = f"- [{md_inline(hit.get('name'))}]({SITE}/w/{hit['slug']})"
+        name = md_inline(hit.get("name"))
+        line = f"- [{name}]({SITE}/w/{hit['slug']})" if hit.get("slug") else f"- {name}"
         snippet = _snippet(hit, "description")
     elif kind == "users":
-        line = f"- [{md_inline(hit.get('displayName') or hit['slug'])}]({SITE}/users/{hit['slug']}) · karma {hit.get('karma') or 0}"
+        name = md_inline(hit.get("displayName") or hit.get("slug"))
+        link = f"[{name}]({SITE}/users/{hit['slug']})" if hit.get("slug") else name
+        line = f"- {link} · karma {hit.get('karma') or 0}"
     else:  # sequences
         line = f"- [{md_inline(hit.get('title')) or '(untitled)'}]({SITE}/s/{hit['_id']})"
         snippet = _snippet(hit, "plaintextDescription", hit.get("plaintextDescription"))
@@ -163,13 +180,16 @@ def thread(post: dict[str, Any], answers: list[dict[str, Any]], comments: list[d
 
 def sequence(seq: dict[str, Any]) -> str:
     """A sequence: title, author and description, then its posts in order, numbered across
-    chapters, under each chapter's title where it has one."""
+    chapters in the order of their `number`, under each chapter's title where it has one."""
     out = [f"# {md_inline(seq.get('title')) or '(untitled)'}", "", f"by {user_label(seq.get('user'))}"]
     description = ((seq.get("contents") or {}).get("markdown") or "").strip()
     if description:
         out += ["", description]
     n = 0
-    for chapter in seq.get("chapters") or []:
+    chapters = [c for c in seq.get("chapters") or [] if c]
+    # A chapter without a number (an untitled preface) comes first, as on the forum; the sort
+    # keeps the response's order among equals.
+    for chapter in sorted(chapters, key=lambda c: (c.get("number") is not None, c.get("number") or 0)):
         out.append("")
         if chapter.get("title"):
             out += [f"## {md_inline(chapter['title'])}", ""]

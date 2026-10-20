@@ -71,11 +71,13 @@ async def lw_get_comments(
 ) -> str:
     """Read a post's whole discussion, or one comment.
 
-    The discussion is always complete. On a question post, the answers come first, each followed
-    by its replies, then the ordinary comments. Every item has a one-line header: its id link,
-    author name (slug), date, karma, agreement score where the forum has one, AF when it is on
-    the Alignment Forum, and "reply to <id>" for a reply. Replies follow their parent; a reply
-    whose parent the forum hides appears at the top level, still naming its parent.
+    The discussion comes back complete, as its header says, unless its answers or its comments,
+    replies included, reach 5,000; then the header says "showing the first N". On a question
+    post, the answers come first, each followed by its replies, then the ordinary comments.
+    Every item has a one-line header: its id link, author name (slug), date, karma, agreement
+    score where the forum has one, AF when it is on the Alignment Forum, and "reply to <id>" for
+    a reply. Replies follow their parent; a reply whose parent the forum hides appears at the
+    top level, still naming its parent.
 
     A long discussion ends with a footer giving the offset to call again with, so it is read
     whole across calls.
@@ -85,6 +87,8 @@ async def lw_get_comments(
         found = (data.get("comment") or {}).get("result")
         if not found:
             raise miss("comment", comment_id)
+        if found.get("postId") is None:  # a tag page's discussion
+            raise ToolError(f"comment {comment_id!r} is on a tag page, not a post; the tools read only comments on posts.")
         if found.get("postId") != post_id:
             raise ToolError(
                 f"comment {comment_id!r} is not on post {post_id!r}; it is on post "
@@ -181,9 +185,13 @@ async def lw_search(
         numeric.append(f"postedAt<{_day_ms(before + timedelta(days=1))}")
     if sort != "relevance":
         notes.append(f"Sort: {sort} (posts and comments).")
-    if numeric or af_only:
-        span = f"{after or 'any day'} to {before or 'today'}"
-        notes.append(f"Posts and comments only from {span}" + (", Alignment Forum only." if af_only else "."))
+    only = []
+    if after is not None or before is not None:
+        only.append(f"from {after or 'any day'} to {before or 'today'}")
+    if af_only:
+        only.append("on the Alignment Forum")
+    if only:
+        notes.append(f"Posts and comments only {' and '.join(only)}.")
 
     queries = []
     for kind in kinds:
@@ -302,17 +310,29 @@ async def lw_filter_posts(
     # The forum counts the whole selector only when the page comes back full; otherwise its
     # total is just this page's rows.
     total = block.get("totalCount") if surplus else offset + len(fetched)
-    rows = [p for p in fetched[:limit] if min_karma is None or (p.get("baseScore") or 0) >= min_karma]
+
+    def passes(p: dict[str, Any]) -> bool:
+        return min_karma is None or (p.get("baseScore") or 0) >= min_karma
+
+    rows = [p for p in fetched[:limit] if passes(p)]
+    # Karma order (backlinks too) is descending, so once the next post falls below min_karma
+    # every later one does as well.
+    more = surplus and (order != "top" or passes(fetched[limit]))
     if links_to is not None:
         filters[0] += f" — {total} total"
-    if surplus and offset < MAX_SKIP:
-        footer = f"\n\n---\n[More: call again with offset={min(offset + limit, MAX_SKIP)}.]"
-    elif surplus:
+    if more and offset < MAX_SKIP:
+        next_offset = min(offset + limit, MAX_SKIP)
+        # Of the rows the next page fetches again, only those this page shows repeat.
+        repeat = sum(passes(p) for p in fetched[next_offset - offset:limit])
+        posts = "post" if repeat == 1 else f"{repeat} posts"
+        overlap = f" Offset stops at {MAX_SKIP}, so that page starts with this page's last {posts}." if repeat else ""
+        footer = f"\n\n---\n[More: call again with offset={next_offset}.{overlap}]"
+    elif more:
         footer = f"\n\n---\n[More posts exist past the paging cap (offset {MAX_SKIP}); narrow the filters to reach them.]"
     else:
         footer = ""
     if not rows:
-        return "No posts matched those filters." + footer
+        return ("No posts on this page matched those filters." if footer else "No posts matched those filters.") + footer
     return "\n".join([f"# Posts ({len(rows)}) — " + "; ".join(filters), ""] + [post_row(p) for p in rows]) + footer
 
 

@@ -8,6 +8,7 @@ import re
 from datetime import date
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 from lesswrong_mcp import forum, tools
 
@@ -17,11 +18,19 @@ POST = "HBxe6wdjxK239zajf"       # Paul Christiano, "What failure looks like" (2
 COMMENT = "CB8ieALcHfSSuAYYJ"    # Wei Dai's top-level comment on that post
 QUESTION = "dKTh9Td3KaJ8QW6gw"   # "why assume AGIs will optimize for fixed goals?", a question post
 SEQUENCE = "Rm6oQRJJmhGCcLvxh"   # "Embedded Agency"
+PREFACED = "4dHMdK5TLN6xcqtyc"   # "Value Learning": an untitled chapter with no number, then numbered ones
+TAG_COMMENT = "yfZg6HRKe8pWnRdgG"  # a discussion comment on the DeepMind tag page
 
 
 def links_carry_ids(text: str) -> None:
     for value in re.findall(r"/api/post/([^/)\s]+)", text):
         assert re.fullmatch(r"[A-Za-z0-9]{17}", value), value
+
+
+def in_karma_order(text: str) -> bool:
+    """The rows' karma never rises: lw_filter_posts ends a min_karma listing on that."""
+    karmas = [int(k) for k in re.findall(r" · karma (-?\d+) · ", text)]
+    return bool(karmas) and karmas == sorted(karmas, reverse=True)
 
 
 def test_markdown_post_route(live_run):
@@ -33,12 +42,13 @@ def test_markdown_post_route(live_run):
 def test_posts_views(live_run, sort):
     text = live_run(tools.lw_filter_posts(author="paulfchristiano", sort=sort, limit=3))
     assert text.startswith("# Posts (3)") and f"sort={sort}" in text
+    assert sort != "top" or in_karma_order(text)
     links_carry_ids(text)
 
 
 def test_pingback_view_with_date_filter(live_run):
     text = live_run(tools.lw_filter_posts(links_to=POST, after=date(2020, 1, 1), limit=5))
-    assert f"links to {POST} — " in text and text.count("\n- [") == 5
+    assert f"links to {POST} — " in text and text.count("\n- [") == 5 and in_karma_order(text)
     links_carry_ids(text)
 
 
@@ -72,6 +82,11 @@ def test_comment_by_id(live_run):
     assert "(wei-dai)" in text.splitlines()[0]
 
 
+def test_tag_page_comment_has_no_post(live_run):
+    with pytest.raises(ToolError, match="is on a tag page, not a post"):
+        live_run(tools.lw_get_comments(POST, comment_id=TAG_COMMENT))
+
+
 def test_post_by_id_and_unknown_id_is_null(live_run):
     query = "query ($id: String) { post(input: {selector: {_id: $id}, allowNull: true}) { result { _id slug } } }"
     found = live_run(forum.graphql(query, {"id": POST}))
@@ -83,6 +98,11 @@ def test_sequence_with_chapters(live_run):
     text = live_run(tools.lw_get_sequence(SEQUENCE))
     assert text.startswith("# Embedded Agency") and "\n1. [" in text
     links_carry_ids(text)
+
+
+def test_chapter_without_a_number_comes_first(live_run):
+    text = live_run(tools.lw_get_sequence(PREFACED))
+    assert "\n## " in text and text.index("\n1. [") < text.index("\n## ")
 
 
 def test_user_and_tag_slug_lookups(live_run):

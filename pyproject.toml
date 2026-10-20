@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lesswrong-mcp"
-version = "3.0.0"
+version = "3.0.1"
 description = "Read-only MCP server for LessWrong and the Alignment Forum."
 # 3.11 is the oldest CPython still in upstream support: 3.10 reached end of life on 2026-10-01
 # (PEP 619).

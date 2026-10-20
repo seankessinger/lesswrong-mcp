@@ -94,6 +94,32 @@ def test_slot_released_after_round_trip(fake_forum, drive):
     assert peak == 4
 
 
+@pytest.mark.parametrize("failure", ["status", "transport"])
+def test_backoff_sleep_holds_no_slot(fake_forum, monkeypatch, drive, failure):
+    # With one slot, a second request gets through while the first backs off only if the
+    # sleep holds none; holding it would time the second request out.
+    monkeypatch.setattr(forum, "CONCURRENCY", 1)
+    failed: list[httpx.Request] = []
+
+    def handler(request):
+        if not failed:
+            failed.append(request)
+            if failure == "transport":
+                raise httpx.ConnectError("refused", request=request)
+            return httpx.Response(503)
+        return httpx.Response(200, text="ok")
+
+    seen = fake_forum(handler)
+    during: list[str] = []
+
+    async def backoff(delay):
+        during.append(await asyncio.wait_for(forum.markdown("/api/post/b"), 1))
+
+    monkeypatch.setattr(forum.asyncio, "sleep", backoff)
+    assert drive(forum.markdown("/api/post/a")) == "ok"
+    assert during == ["ok"] and [r.url.path for r in seen] == ["/api/post/a", "/api/post/b", "/api/post/a"]
+
+
 # --------------------------------------------------------------------------- redirect guard
 
 def redirect_to(location: str):
