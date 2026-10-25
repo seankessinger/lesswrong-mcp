@@ -1,0 +1,12 @@
+[
+  { "source": "§4.3", "match": { "root": "post", "id": "uMQ3cqWDPHhjtiesc" },
+    "result": { "result": { "_id": "uMQ3cqWDPHhjtiesc", "title": "AGI Ruin: A List of Lethalities", "slug": "agi-ruin-a-list-of-lethalities", "af": true, "question": false, "rejected": false, "unlisted": false, "shortform": false, "hideAuthor": false, "isEvent": false, "hiddenRelatedQuestion": false, "groupId": null } } },
+  { "source": "§4.3", "match": { "root": "post", "id": "AAAAAAAAAAAAAAAAA" }, "result": { "result": null } },
+  { "source": "§4.3", "match": { "root": "user", "id": "AAAAAAAAAAAAAAAAA" }, "error": { "message": "app.missing_document" } },
+  { "source": "§6.7", "match": { "root": "post", "id": "BBBBBBBBBBBBBBBBB" }, "error": { "message": "app.operation_not_allowed" } },
+  { "source": "§4.8", "match": { "root": "TagsByCoreTagId", "args": { "coreTagId": "AAAAAAAAAAAAAAAAA" } }, "error": { "message": "Tag not found", "dataNull": true } },
+  { "source": "§5.1", "match": { "index": "posts", "query": "\"inner alignment\"", "page": 0, "hitsPerPage": 10 },
+    "result": { "nbHits": 569, "hits": [ { "objectID": "uMQ3cqWDPHhjtiesc", "_id": "uMQ3cqWDPHhjtiesc", "title": "AGI Ruin: A List of Lethalities", "_snippetResult": { "body": { "value": "…the **inner alignment** problem…" } } } ] } },
+  { "source": "§5.6", "match": { "index": "posts", "query": "\"inner alignment\"", "page": 1000, "hitsPerPage": 10 },
+    "error": { "message": "search_phase_execution_exception … Result window is too large, from + size must be less than or equal to: [10000]", "status": 400 } }
+]

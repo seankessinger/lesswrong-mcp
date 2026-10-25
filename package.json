@@ -1,0 +1,36 @@
+{
+  "name": "lesswrong-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only MCP server for LessWrong and the Alignment Forum, packaged as a Claude Desktop extension.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node scripts/build.mjs",
+    "pack": "npm run build && node scripts/pack.mjs",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "diff": "9.0.0",
+    "turndown": "7.2.4",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/node": "22.20.5",
+    "@types/turndown": "5.0.6",
+    "esbuild": "0.28.2",
+    "fast-check": "4.10.2",
+    "graphql": "16.14.2",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}

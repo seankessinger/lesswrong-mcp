@@ -1,0 +1,45 @@
+{
+  "manifest_version": "0.3",
+  "name": "lesswrong-mcp",
+  "display_name": "LessWrong and Alignment Forum Research",
+  "version": "1.0.0",
+  "description": "Read-only research tools for LessWrong and the Alignment Forum: posts, discussions, people, wiki tags, sequences, links, reactions, edit history and search.",
+  "long_description": "Reads only what the forums show to logged-out visitors. Never writes, votes or logs in. Requests are spaced, cached and capped to stay polite to the forum.",
+  "author": { "name": "Sean Kessinger" },
+  "license": "MIT",
+  "keywords": ["lesswrong", "alignment forum", "ai safety", "research", "read-only"],
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.mjs"],
+      "env": {}
+    }
+  },
+  "tools": [
+    { "name": "find", "description": "Turn post titles, people's names, topics and sequence titles into exact ids, with ranked candidates." },
+    { "name": "search", "description": "Full-text search of posts, comments, people, wiki pages and sequences, with filters." },
+    { "name": "get_post", "description": "A post's metadata, status, reviews and text, with an outline and sections." },
+    { "name": "get_comments", "description": "A discussion as ranked threads, with disagreement signals and reply maps." },
+    { "name": "list_posts", "description": "Posts filtered by person, tag, dates, AF and status, best first or by date." },
+    { "name": "list_comments", "description": "Comments by a person, recent comments site-wide, or quick takes." },
+    { "name": "get_user", "description": "A person's public profile with their top and latest posts, latest comments and wiki edits." },
+    { "name": "get_tag", "description": "A wiki page's text, structure, likes and top tagged posts." },
+    { "name": "get_sequence", "description": "A sequence's posts in reading order, or a collection's books." },
+    { "name": "list_sequences", "description": "All public sequences, a person's sequences, or curated sequences." },
+    { "name": "get_history", "description": "Edit history of a post, comment or wiki page, or a person's wiki edits: versions, original, texts and diffs." },
+    { "name": "first_use", "description": "Earliest verifiable use of a phrase, checked against edit history." },
+    { "name": "get_links", "description": "Posts linking to a post, wiki pages linking to a page, and the links in a text." },
+    { "name": "get_reactions", "description": "Karma, votes, agreement, likes and reactions on a post, comment or wiki page, in detail." },
+    { "name": "get_feed", "description": "Front page (approximate), recent discussion, popular comments, quick takes, Best of LessWrong and other feeds." },
+    { "name": "list_tags", "description": "The site's tags that can be applied to posts, or all tags grouped under a core tag." }
+  ],
+  "tools_generated": false,
+  "prompts_generated": false,
+  "compatibility": {
+    "platforms": ["darwin", "win32"],
+    "runtimes": { "node": ">=20.0.0" }
+  }
+}
