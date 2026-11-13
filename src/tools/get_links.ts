@@ -24,21 +24,23 @@ import { badInput, CallStopped, internalError, isToolError, notFound, ToolError 
 import { incomingPostsOp, incomingTagOps, linkBodyOp, linkResolutionOps, type LinkTargets } from "../forum/templates/get_links";
 import { collectionsListingOp } from "../forum/templates/shared";
 import { parseRef } from "../ids/parse";
-import { commentPlace, echoOf, negativeKey, readResolution, resolutionOps, resolve } from "../ids/resolve";
+import { commentPlace, echoOf, readResolution, resolutionOps, resolve, throwRemembered } from "../ids/resolve";
 import {
   collect, compareLocal, fingerprint, lightScan, listPage, sliceAfter, stateAfter, type OffsetSource,
 } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { renderPage } from "../render/layout";
 import { DEPTH_HINT, emptyText, fmtInt, partialLine } from "../render/messages";
-import { commentRefText, personText, postLine, postRefText, seqRefText, tagRefText, wikiEditPageText } from "../render/records";
+import { commentRefText, counted, personText, postLine, postRefText, seqRefText, tagRefText, wikiEditPageText } from "../render/records";
 import { oneLine } from "../text/sanitize";
 import type {
-  AliasResults, CallContext, Category, CollectionSlug, Consumed, CursorEntry, CursorState, Footer, PageItem, PageSpec, ParsedRef, RawCommentRef,
+  AliasResults, CallContext, CollectionSlug, Consumed, CursorEntry, CursorState, Footer, PageItem, PageSpec, ParsedRef, RawCommentRef,
   RawLensRef, RawMdocRef, RawPostCard, RawPostLight, RawPostRef, RawSeqRef, RawTagRef, RawUserRef, Resolved, Services, StopReason,
   StreamState, ToolDef, ToolOutput, VisibleTagRef, WikiEditPage,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, rowsOf, setting } from "./common";
+import {
+  checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, resumedFrom, rowsOf, setting,
+} from "./common";
 import { aliasData, cachedCollectionsListing, loadCollectionsListing, noPage } from "./loaders";
 
 type GetLinksParams = {
@@ -87,7 +89,6 @@ const WIKI_EMPTY_NOTE = "The forum's link index records only some links between 
 const TRIAL_NONCE = "000000";
 
 const quoted = (s: string, cap: number): string => `"${oneLine(s, cap)}"`;
-const counted = (n: number, one: string): string => `${fmtInt(n)} ${one}${n === 1 ? "" : "s"}`;
 const idOf = (r: { _id: string }): string => r._id;
 /** A posting date in epoch milliseconds; 0 for an unreadable one, so that orders and fingerprints stay comparable. */
 function postedMs(r: { postedAt: string }): number {
@@ -159,8 +160,7 @@ interface Subject {
 async function postSubject(input: string, ctx: CallContext, svc: Services): Promise<Subject> {
   const ref = parseRef("post", input, ["post"]);
   // A remembered `not_found` or `not_public` (¶2.3, the negative cache `readResolution` writes) costs no request.
-  const negative = svc.caches.get<{ category: Category; message: string }>("negative", negativeKey(ref));
-  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
+  throwRemembered(ref, svc);
   const results = await svc.gql(resolutionOps(ref, "", { post: SUBJECT_SELECT }), ctx, SUBJECT_TASK);
   const resolved = readResolution(ref, "post", "", results, ctx, svc);
   const contents = isRecord(resolved.doc) ? resolved.doc.contents : undefined;
@@ -945,8 +945,7 @@ async function continuation(entry: CursorEntry, p: GetLinksParams, ctx: CallCont
   return linksPage(
     {
       subject, ask, start: startOf(entry),
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -968,7 +967,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetLinksParams> = {
   name: "get_links",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   oneOf: [["post", "tag"]],
   run(p, ctx, svc) {

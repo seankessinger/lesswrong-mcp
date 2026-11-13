@@ -6,7 +6,7 @@ import { z } from "zod";
 import { INSTRUCTIONS, ANNOTATIONS, CANCELLED, listTools, callTool, createServer } from "../src/server";
 import { abortableSleep, fetchFor } from "../src/index";
 import { TOOLS } from "../src/tools/registry";
-import { P, CONVENTIONS_LINE } from "../src/params/vocabulary";
+import { P } from "../src/params/vocabulary";
 import { notFound, CallStopped } from "../src/errors";
 import { postByIdOp } from "../src/forum/templates/shared";
 import { connectInMemory, connectStdioClient } from "./support/mcpClient";
@@ -16,7 +16,7 @@ import type { ToolDef, CallContext, Services } from "../src/types";
 let seen: CallContext | undefined;
 let behaviour: "ok" | "notFound" | "time" | "cap" | "crash" = "ok";
 const stub: ToolDef<{ post?: string; comment?: string; tag?: string; limit: number; cursor?: string; max_tokens: number }> = {
-  name: "get_post", title: "Stub", description: "Stub tool.\n\n" + CONVENTIONS_LINE,
+  name: "get_post", title: "Stub", description: "Stub tool.",
   schema: z.strictObject({ post: P.post().optional(), comment: P.comment().optional(), tag: P.tag().optional(), limit: P.limit(), cursor: P.cursor().optional(), max_tokens: P.maxTokens() }),
   required: ["post"], oneOf: [["post", "comment", "tag"]],
   async run(p, ctx, svc) {
@@ -54,7 +54,7 @@ describe("server", () => {
     const conn = await connectInMemory(createServer({ tools: [stub], services: h.services, now: h.clock.now }));
     const { tools } = await conn.client.listTools();
     expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({ name: "get_post", title: "Stub", description: "Stub tool.\n\n" + CONVENTIONS_LINE, annotations: ANNOTATIONS });
+    expect(tools[0]).toMatchObject({ name: "get_post", title: "Stub", description: "Stub tool.", annotations: ANNOTATIONS });
     const schema = tools[0].inputSchema as { required: string[]; additionalProperties: boolean; properties: Record<string, unknown> };
     expect(schema.required).toEqual(["post"]);
     expect(schema.additionalProperties).toBe(false);

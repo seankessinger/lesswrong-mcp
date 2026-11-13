@@ -368,6 +368,21 @@ describe("get_user: af_only, errors and paging", () => {
     expect(again.text).toContain("post_id AxelPinnedPost001");
   });
 
+  it("¶2.2 step 5 a stopped follow-up leaves out only the sections it was asked for: an af_only scan with no AF comment needs no hydrate, and is told", async () => {
+    const noAf = [1, 2, 3].map((n) => rawCommentLight({ _id: `AxelLight0000000${n}`, af: false, userId: AXEL, postedAt: `2026-10-0${6 - n}T00:00:00.000Z` }));
+    const extra = [
+      ...axelAfOnlyEntries().filter((e) => (e.match as { limit?: number }).limit !== 500),
+      gqlEntry({ root: "comments", view: "allRecentComments", terms: { userId: AXEL, sortBy: "new" }, limit: 500 }, { results: noAf }, "§16"),
+    ];
+    const h = createHarness({ families: FAMILIES, extra });
+    h.forum.inject({ endpoint: "graphql", when: (b) => b.includes("get_user_main"), delayMs: 41_000, times: 1 });
+    const out = await h.call("get_user", { user: "axel-hojmark", limit: 3, af_only: true });
+    expect(h.forum.requests).toHaveLength(2);
+    expect(out.text).not.toContain("Pinned posts:");
+    expect(out.text).toContain('af_only kept 0 of the latest 500 comments; more: list_comments {user: "axel-hojmark", af_only: true}');
+    expect(out.text).toMatch(/Stopped early \(time limit\); call get_user with cursor "c_[A-Za-z0-9_-]{22}" to continue\.$/);
+  });
+
   it("more than 2,000 wiki revisions: the follow-up reads the second page and the section says only the first 2,000 can be ordered", async () => {
     const h = createHarness({ families: FAMILIES, extra: [
       gqlEntry({ root: "revisions", view: "revisionsByUser", terms: { userId: AXEL }, offset: 1000 }, { results: wikiEditRows("AxelBulkEd", 1000, axelRef()) }, "§7.1"),

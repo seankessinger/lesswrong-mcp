@@ -31,8 +31,6 @@ export const CONFIG = deepFreeze({
 
   /** D12, D13, ¶7: transport. A test builds its own copy through `httpConfigWith`. */
   http: {
-    graphqlUrl: "https://www.lesswrong.com/graphql",
-    searchUrl: "https://www.lesswrong.com/api/search",
     userAgent: `lesswrong-mcp/${VERSION} (read-only research extension for Claude Desktop; single user; one request at a time)`,
     spacingMs: 3000,                 // minimum time between request starts
     maxSpacingMs: 30000,             // the spacing doubles after a 429, a 503 or a non-JSON 200, up to this
@@ -44,7 +42,6 @@ export const CONFIG = deepFreeze({
     episodeResetMs: 1800000,         // an episode is forgotten after 30 minutes
     inCallRetryMaxWaitMs: 10000,     // a 429/503 is retried within a call only if the pause ends within this
     inCallRetriesMax: 2,
-    requestTimeoutMaxMs: 45000,
     maxResponseBytes: 12582912,      // 12 MB: a larger response is aborted
     sessionWindows: [                // D13 rolling windows (1 MB = 1,048,576 bytes)
       { ms: 600000, requests: 150, bytes: 104857600, label: "10 minutes" },
@@ -58,6 +55,7 @@ export const CONFIG = deepFreeze({
     deadlineMs: 50000,
     noNewRequestAfterMs: 40000,
     maxCallBytes: 20971520,          // 20 MB downloaded per call
+    requestTimeoutMaxMs: 45000,      // one request's longest wait, also bounded by the call's deadline
     maxRequests: {
       find: 3, search: 5, get_post: 3, get_comments: 4, list_posts: 6, list_comments: 5, get_user: 4, get_tag: 2,
       get_sequence: 3, list_sequences: 5, get_history: 7, first_use: 7, get_links: 4, get_reactions: 3, get_feed: 2, list_tags: 2,

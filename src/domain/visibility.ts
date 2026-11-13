@@ -4,8 +4,8 @@
 // function is pure: it never throws and never logs (callers count what they drop and log only the numbers, P14).
 import { CONFIG } from "../config";
 import type {
-  Person, PostRef, RawCommentRef, RawGlossaryTerm, RawLensRef, RawMdocRef, RawPostRef, RawRevRow, RawSeqRef, RawTagRef,
-  RawUserRef, SeqRef, TagRef, VisibleTagRef, WikiEditPage,
+  Person, PostRef, RawCommentRef, RawGlossaryTerm, RawLensRef, RawMdocRef, RawPostRef, RawRevRow, RawSeqRef, RawTagRef, RawUserRef,
+  SeqRef, TagRef, UserPerson, VisibleTagRef, WikiEditPage,
 } from "../types";
 
 const UNREVIEWED_CUTOFF_MS = Date.parse(CONFIG.unreviewedCutoff);
@@ -100,8 +100,8 @@ export function maskSeqRef(s: RawSeqRef | null | undefined): SeqRef {
   return { hidden: false, id: s._id, title: s.title, af: s.af, hiddenFromLists: s.hidden };
 }
 
-/** P19: only a comment with a named author counts toward a person. */
-export function attributable(c: { author: Person }): boolean {
+/** P19: only a comment with a named author counts toward a person; its author is then known to be a user. */
+export function attributable<C extends { author: Person }>(c: C): c is C & { author: UserPerson } {
   return c.author.kind === "user";
 }
 

@@ -19,15 +19,15 @@ describe("get_history templates and definition", () => {
       'p: post(selector: {_id: "zHhGa3iQBQcdSifFL"}, allowNull: true) { result { ...POST_REF postedAt hideAuthor collabEditorDialogue debate contents { version editedAt } } }',
     ]);
     expect(historyDocOps(r("post", "slug", "some-slug"), "post")[0].text)
-      .toBe('ps: posts(selector: {slugPost: {slug: "some-slug"}}, limit: 2) { results { ...POST_REF postedAt hideAuthor collabEditorDialogue debate contents { version editedAt } } }');
-    expect(historyDocOps(r("post", "idOrSlug", LEAN), "post").map((o) => o.alias)).toEqual(["p", "ps"]);
+      .toBe('s: posts(selector: {slugPost: {slug: "some-slug"}}, limit: 2) { results { ...POST_REF postedAt hideAuthor collabEditorDialogue debate contents { version editedAt } } }');
+    expect(historyDocOps(r("post", "idOrSlug", LEAN), "post").map((o) => o.alias)).toEqual(["p", "s"]);
     expect(historyDocOps(r("tag", "id", "RkznxXmmh9b5ovdSq"), "tag").map((o) => o.text)).toEqual([
       't: tag(selector: {_id: "RkznxXmmh9b5ovdSq"}) { result { ...TAG_REF description { version editedAt } } }',
       'm: multiDocument(selector: {_id: "RkznxXmmh9b5ovdSq"}) { result { ...MDOC_REF contents { version editedAt } } }',
     ]);
     expect(historyDocOps(r("tag", "slug", "bayes-rule-guide"), "tag")[0].text)
-      .toBe('lp: TagPreview(slug: "bayes-rule-guide") { tag { ...TAG_REF description { version editedAt } } lens { ...MDOC_REF contents { version editedAt } } }');
-    expect(historyDocOps(r("tag", "idOrSlug", "RkznxXmmh9b5ovdSq"), "tag").map((o) => o.alias)).toEqual(["t", "m", "lp"]);
+      .toBe('b: TagPreview(slug: "bayes-rule-guide") { tag { ...TAG_REF description { version editedAt } } lens { ...MDOC_REF contents { version editedAt } } }');
+    expect(historyDocOps(r("tag", "idOrSlug", "RkznxXmmh9b5ovdSq"), "tag").map((o) => o.alias)).toEqual(["t", "m", "b"]);
     expect(historyDocOps(r("post", "id", LEAN), "post")[0].template).toBe("get_history_req1");
   });
 
@@ -287,7 +287,7 @@ describe("get_history: the version list", () => {
     // D1 on every continuation: the stored id is tried again as id and slug; another document holding that slug is not the cursor's.
     h.clock.advance(6 * 60_000);   // past the raw-response cache: the document is asked again
     const other = { ...rawPostRef({ _id: "AnotherLeanPost01", title: "Another post", slug: LEAN, af: false }), postedAt: "2025-01-01T00:00:00.000Z", hideAuthor: false, contents: { version: "1.0.0", editedAt: "2025-01-01T00:00:00.000Z" } };
-    h.forum.inject({ endpoint: "graphql", when: (b) => b.includes("get_history_req1"), body: JSON.stringify({ data: { p: { result: null }, ps: { results: [other] } } }) });
+    h.forum.inject({ endpoint: "graphql", when: (b) => b.includes("get_history_req1"), body: JSON.stringify({ data: { p: { result: null }, s: { results: [other] } } }) });
     const moved = await h.call("get_history", { cursor });
     expect(moved.text).toBe('Error (not_found): No publicly visible post has the id "zHhGa3iQBQcdSifFL".');
     expect(gqlTexts(h.forum).at(-1)).toContain('p: post(selector: {_id: "zHhGa3iQBQcdSifFL"}');
@@ -304,6 +304,16 @@ describe("get_history: the version list", () => {
 });
 
 describe("get_history: texts and diffs", () => {
+  it("¶3.9 a version text the forum fails to read is the call's error, worded with what the request was for", async () => {
+    const h = createHarness({ families: FAMILIES });
+    h.forum.inject({
+      endpoint: "graphql", when: (b) => b.includes("revision_text"), times: 1,
+      body: JSON.stringify({ data: { r1: null }, errors: [{ message: "Something went wrong", path: ["r1"] }] }),
+    });
+    const out = await h.call("get_history", { post: LEAN, revision: "original" });
+    expect(out.text).toBe("Error (forum_error): The forum returned an error while reading the version texts (Something went wrong). Try again later.");
+  });
+
   it("revision original: the text from the visible list, fenced; three requests", async () => {
     const h = createHarness({ families: FAMILIES });
     const out = await h.call("get_history", { post: LEAN, revision: "original" });
@@ -412,9 +422,9 @@ describe("get_history: texts and diffs", () => {
     for (const row of evidence) expect(row).not.toMatch(/ · [\d,]+ words?\b/);
   });
 
-  // first_use keeps a version's own page text under the version's id (revisionTexts); get_history reads a version that has a folded
-  // image copy from the copy's page (textId). Each keys the shared cache by the revision whose page it read, so neither serves the
-  // other's text: get_history once showed first_use's copy for 6 hours (a February-July 2026 version's [equation], say).
+  // first_use keeps a version's own page text under the version's id; get_history reads a version that has a folded image copy from
+  // the copy's page (textId). Their one reader (loaders' revisionTexts) keys the shared cache by the revision whose page was read, so
+  // neither serves the other's text: get_history once showed first_use's copy for 6 hours (a February-July 2026 version's [equation], say).
   it("a version with a folded image copy is read from the copy, even after first_use kept the version's own page", async () => {
     const h = createHarness({ families: FAMILIES });
     h.services.caches.set("revtext", "LeanRev0000000005", "OWN-PAGE-TEXT of v1.11.0, as first_use keeps it");

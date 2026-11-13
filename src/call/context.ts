@@ -47,7 +47,7 @@ export function createCallContext(tool: ToolName, opts: CallContextOptions): Cal
       const reason = blockedBy(true);
       if (reason !== undefined) throw new CallStopped(reason);
     },
-    requestTimeoutMs: () => Math.max(0, Math.min(CONFIG.http.requestTimeoutMaxMs, deadlineMs - elapsed())),
+    requestTimeoutMs: () => Math.max(0, Math.min(CONFIG.call.requestTimeoutMaxMs, deadlineMs - elapsed())),
     charge(bytes) {
       ctx.bytesUsed += bytes;
     },

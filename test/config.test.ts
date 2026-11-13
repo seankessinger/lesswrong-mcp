@@ -14,8 +14,6 @@ describe("config constants (¶7, ¶2.3, ¶3.6, ¶3.7, D12, D13)", () => {
 
   it("D13 and ¶7 transport values", () => {
     expect(CONFIG.http).toEqual({
-      graphqlUrl: "https://www.lesswrong.com/graphql",
-      searchUrl: "https://www.lesswrong.com/api/search",
       userAgent: "lesswrong-mcp/1.0.0 (read-only research extension for Claude Desktop; single user; one request at a time)",
       spacingMs: 3000,
       maxSpacingMs: 30000,
@@ -27,7 +25,6 @@ describe("config constants (¶7, ¶2.3, ¶3.6, ¶3.7, D12, D13)", () => {
       episodeResetMs: 1800000,
       inCallRetryMaxWaitMs: 10000,
       inCallRetriesMax: 2,
-      requestTimeoutMaxMs: 45000,
       maxResponseBytes: 12582912,
       sessionWindows: [
         { ms: 600000, requests: 150, bytes: 104857600, label: "10 minutes" },
@@ -42,6 +39,7 @@ describe("config constants (¶7, ¶2.3, ¶3.6, ¶3.7, D12, D13)", () => {
       deadlineMs: 50000,
       noNewRequestAfterMs: 40000,
       maxCallBytes: 20971520,
+      requestTimeoutMaxMs: 45000,
       maxRequests: {
         find: 3, search: 5, get_post: 3, get_comments: 4, list_posts: 6, list_comments: 5, get_user: 4, get_tag: 2,
         get_sequence: 3, list_sequences: 5, get_history: 7, first_use: 7, get_links: 4, get_reactions: 3, get_feed: 2, list_tags: 2,

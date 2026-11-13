@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { tool } from "../../src/tools/get_reactions";
-import { reactionItemOp, reactorIdsOp } from "../../src/forum/templates/get_reactions";
+import { REACTION_FIELDS, reactorIdsOp } from "../../src/forum/templates/get_reactions";
+import { commentByIdOp, multiDocumentByIdOp, postByIdOp, tagByIdOp } from "../../src/forum/templates/shared";
 import { documentFor } from "../../src/forum/templates/op";
 import { estimateTokens } from "../../src/render/budget";
 import { fmtInt } from "../../src/render/messages";
@@ -25,8 +26,8 @@ describe("get_reactions", () => {
   });
 
   it("get_reactions: the item and reactor templates, exact text; Tag.usersWhoLiked, allVotes and currentUserVote never selected", () => {
-    const ops = [reactionItemOp("post", "uMQ3cqWDPHhjtiesc"), reactionItemOp("comment", "HRDoDnHv8bvoW7oPZ"),
-      reactionItemOp("tag", "56yXXrcxRjrQs6z9R"), reactionItemOp("lens", "aaaaaaaaaaaaaaaaa"), reactorIdsOp(["nmk3nLpQE89dMRzzN"])!];
+    const ops = [postByIdOp("p", "uMQ3cqWDPHhjtiesc", REACTION_FIELDS.post), commentByIdOp("c", "HRDoDnHv8bvoW7oPZ", REACTION_FIELDS.comment),
+      tagByIdOp("t", "56yXXrcxRjrQs6z9R", REACTION_FIELDS.tag), multiDocumentByIdOp("m", "aaaaaaaaaaaaaaaaa", REACTION_FIELDS.mdoc), reactorIdsOp(["nmk3nLpQE89dMRzzN"])!];
     expect(ops.map((o) => o.text)).toEqual([
       'p: post(selector: {_id: "uMQ3cqWDPHhjtiesc"}, allowNull: true) { result { ...POST_REF baseScore voteCount afBaseScore afVoteCount extendedScore user { _id slug displayName } } }',
       'c: comment(selector: {_id: "HRDoDnHv8bvoW7oPZ"}, allowNull: true) { result { ...COMMENT_REF baseScore voteCount afBaseScore afVoteCount extendedScore post { ...POST_REF } tag { ...TAG_REF } } }',
@@ -55,7 +56,7 @@ describe("get_reactions", () => {
     ].join("\n") });
     expect(h.forum.requests).toHaveLength(2);
     const texts = gqlTexts(h.forum);
-    expect(texts[0]).toContain(reactionItemOp("comment", "reactsCmnt0000001").text);
+    expect(texts[0]).toContain(commentByIdOp("c", "reactsCmnt0000001", REACTION_FIELDS.comment).text);
     expect(texts[1]).toContain('ids: users(selector: {usersByUserIds: {userIds: ["aliceUserId000001", "bobUserId00000001", "danUserId00000001", "carolUserId000001"]}}, limit: 4)');
     for (const s of ["512", "Robert", "thanks", "PLANTED"]) expect(out.text).not.toContain(s);
     expectClean(h);

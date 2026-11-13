@@ -8,7 +8,7 @@ import { ID_RE } from "../ids/parse";
 import { isoMs } from "../text/dates";
 
 const GRAPHQL_NAME_RE = /^[_A-Za-z][_0-9A-Za-z]*$/;
-const DATE_LITERAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+export const DATE_LITERAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
  * A GraphQL string literal. A lone surrogate is refused as `bad_input` named after `param`, before anything is

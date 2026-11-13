@@ -17,13 +17,15 @@ import { sequencesByIdsOp } from "../forum/templates/shared";
 import { parseRef } from "../ids/parse";
 import { echoOf, resolve } from "../ids/resolve";
 import { compareLocal, fingerprint, lightScan, listPage } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
-import { CAVEAT, emptyText, endMostReturned, fmtInt } from "../render/messages";
-import { personText, sequenceLine } from "../render/records";
+import { FORUM_TEXT, P } from "../params/vocabulary";
+import { CAVEAT, emptyText, endMostReturned } from "../render/messages";
+import { counted, personText, sequenceLine } from "../render/records";
 import type {
   CallContext, Consumed, CursorEntry, Footer, PageItem, RawSeqCard, RawSeqLight, Resolved, Services, StreamState, ToolDef, ToolOutput,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, rowsOf, setting } from "./common";
+import {
+  checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, resumedFrom, rowsOf, setting,
+} from "./common";
 import { aliasData } from "./loaders";
 
 export type ListSequencesParams = {
@@ -49,7 +51,7 @@ const SET_MOST = CONFIG.paging.sequenceSetRows * CONFIG.paging.sequenceSetPages;
 
 const idOf = (r: { _id: string }): string => r._id;
 /** A creation date in epoch milliseconds; 0 for an unreadable one, so that orders and fingerprints stay comparable. */
-function createdMs(r: { createdAt: string }): number {
+export function createdMs(r: { createdAt: string }): number {
   const t = Date.parse(r.createdAt);
   return Number.isFinite(t) ? t : 0;
 }
@@ -147,9 +149,6 @@ interface PageInput {
   effective: Record<string, unknown>;
 }
 
-/** `1 sequence`, `3 sequences`. */
-const counted = (n: number): string => `${fmtInt(n)} ${n === 1 ? "sequence" : "sequences"}`;
-
 /** A sequence of the page, hydrated, and where its row stood in the page. */
 interface Shown { card: RawSeqCard; at: number }
 
@@ -229,7 +228,7 @@ async function pageOf(input: PageInput, maxTokens: number, ctx: CallContext, svc
 
   const head = [
     ...(ask.curated || user === undefined ? [COVER_NOTE] : []),
-    ...(ask.af ? [`af_only removed ${counted(removed)} not on the Alignment Forum`] : []),
+    ...(ask.af ? [`af_only removed ${counted(removed, "sequence")} not on the Alignment Forum`] : []),
     // ¶3.9: nothing at all on a first page is the filtered-list template; a continuation past the end has nothing to restate.
     ...(page.items.length === 0 && shown0 === 0 ? [emptyLine(ask, user)] : []),
   ];
@@ -272,8 +271,7 @@ async function continuation(entry: CursorEntry, p: ListSequencesParams, ctx: Cal
   return pageOf(
     {
       ask: { curated: stored.curated_only, af: stored.af_only, sort: stored.sort, limit: stored.limit }, user, set, state: start,
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -294,7 +292,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<ListSequencesParams> = {
   name: "list_sequences",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   run(p, ctx, svc) {
     const entry = openContinuation("list_sequences", p.cursor, svc);

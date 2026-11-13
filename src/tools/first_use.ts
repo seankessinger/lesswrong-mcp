@@ -24,10 +24,9 @@ import { commentPublic, isPlaceholder, postListable } from "../domain/visibility
 import { CallStopped, internalError, isToolError, ToolError } from "../errors";
 import { buildSearch } from "../forum/search";
 import { AS_PUBLISHED_LIMIT, firstUseHistoryOps, firstUseHydrateOps } from "../forum/templates/first_use";
-import { revisionTextOp } from "../forum/templates/shared";
 import { isEntityId } from "../ids/parse";
 import { fingerprint, listPage } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { fitsWhole } from "../render/layout";
 import { CAVEAT, driftNote, emptyText, FLAG, fmtInt, partialLine } from "../render/messages";
 import { personText, placeText } from "../render/records";
@@ -39,8 +38,10 @@ import type {
   RawPostCard, RawRevRow, RevisionDoc, RevisionRecord, SearchHit, SearchResult, SearchSpec, Services, StopReason, StreamState, ToolDef,
   ToolOutput,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, rowsOf, setting } from "./common";
-import { aliasData, noPage, postText, readRevisions } from "./loaders";
+import {
+  checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, resumedFrom, rowsOf, setting,
+} from "./common";
+import { aliasData, introductionRounds, noPage, revisionTexts } from "./loaders";
 
 type FirstUseParams = {
   forms?: string[]; include_comments: boolean; af_only: boolean; limit: number; cursor?: string; max_tokens: number;
@@ -70,10 +71,8 @@ const SEARCH_PAGES = 2;
 const CHECKED_MAX = 10;
 /** ¶4.12 step 5: at most this many earlier-dated rejected hits are hydrated, so that they can be named. */
 const REJECTED_HYDRATED = 10;
-/** ¶4.12 step 8: `findIntroduction` re-dates this many candidates, in at most this many rounds of this many probes. */
+/** ¶4.12 step 8: `findIntroduction` re-dates this many candidates (in the rounds `introductionRounds` allows). */
 const REDATED_MAX = 2;
-const PROBE_ROUNDS = 2;
-const PROBES = 10;
 
 const SEP = " · ";
 const TITLE_CAP = CONFIG.render.caps.title;
@@ -443,43 +442,21 @@ function historyOf(results: AliasResults, key: string, doc: Doc): History | Tool
 }
 
 /**
- * The text of revisions `ids`, each from a visible list of a confirmed post (P17; `owners` maps it to that post), that is its
- * page: cached texts (`revtext`, shared with `get_history`) cost nothing, the rest are fetched in one request,
- * `r1`…`rN`. A text the forum no longer returns, one of another document, or one with no page is left out; `error` is the first
- * alias error beyond "nothing here", or the missing page.
+ * The texts of revisions `ids`, each from a visible list of a confirmed post (P17; `owners` maps it to that post): their own
+ * pages, read by `revisionTexts` (the `revtext` cache, shared with `get_history`, then one request). A text the forum no longer
+ * returns, one of another document, or one with no page is left out; `error` is the first problem, for a `Partial:` line: an
+ * alias error beyond "nothing here" as the forum gave it, or the missing page.
  */
-async function revisionTexts(
+async function pageTexts(
   ids: readonly string[], owners: ReadonlyMap<string, string>, task: string, ctx: CallContext, svc: Services,
 ): Promise<{ texts: Map<string, string>; error?: ToolError }> {
-  const texts = new Map<string, string>();
-  const missing: string[] = [];
-  for (const id of new Set(ids)) {
-    const cached = svc.caches.get<string>("revtext", id);
-    if (cached === undefined) missing.push(id);
-    else texts.set(id, cached);
-  }
-  if (missing.length === 0) return { texts };
-  const ops = missing.map((id, i) => revisionTextOp(`r${i + 1}`, ctx.confirmPublic("revision", id), true));
-  const results = await readRevisions(ops, task, ctx, svc);
-  let error: ToolError | undefined;
-  missing.forEach((id, i) => {
-    const r = results.get(`r${i + 1}`);
-    if (r === undefined) return;
-    if ("error" in r) {
-      if (r.error !== "not_found" && r.error !== "not_public") error ??= new ToolError(r.error, r.message);
-      return;
-    }
-    const result = isRecord(r.data) ? r.data.result : undefined;
-    if (!isRecord(result) || result._id !== id || result.documentId !== owners.get(id)) return;
-    const text = postText(result);
-    if (text === undefined) {
-      error ??= noPage();
-      return;
-    }
-    svc.caches.set("revtext", id, text);
-    texts.set(id, text);
+  const wanted = ids.flatMap((id) => {
+    const docId = owners.get(id);
+    return docId === undefined ? [] : [{ id, source: id, docId }];
   });
-  return { texts, ...(error !== undefined && { error }) };
+  const { texts, error } = await revisionTexts(wanted, { post: true }, task, ctx, svc);
+  if (error === undefined) return { texts };
+  return { texts, error: error === "no page" ? noPage() : new ToolError(error.error, error.message) };
 }
 
 /** What steps 6–8 found for the page: verdicts are set on the `Shown` records themselves. */
@@ -548,7 +525,7 @@ async function checkHistories(shown: readonly Shown[], ask: Ask, ctx: CallContex
   const wanted = [...histories.values()].flatMap((h) => (h.published === undefined ? [] : [h.published.id]));
   let texts = new Map<string, string>();
   try {
-    const got = await revisionTexts(wanted, owners, TEXT_TASK, ctx, svc);
+    const got = await pageTexts(wanted, owners, TEXT_TASK, ctx, svc);
     texts = got.texts;
     if (got.error !== undefined) partials.push(partialLine(PARTIAL.texts, got.error));
   } catch (e) {
@@ -588,26 +565,15 @@ async function checkHistories(shown: readonly Shown[], ask: Ask, ctx: CallContex
   const series: IntroSeries[] = added.map(({ s, rows }) => ({ key: s.c.id, rows, phrases: s.c.forms }));
   // The writer's own words: a version that only quotes the phrase does not hold it.
   const fetchTexts = async (ids: readonly string[]): Promise<ReadonlyMap<string, string>> => {
-    const got = await revisionTexts(ids, owners, PROBE_TASK, ctx, svc);
+    const got = await pageTexts(ids, owners, PROBE_TASK, ctx, svc);
     if (got.error !== undefined) throw got.error;
     return new Map([...got.texts].map(([id, text]) => [id, ownWords(text)]));
   };
-  const rounds = Math.max(0, Math.min(PROBE_ROUNDS, ctx.maxRequests - ctx.requestsUsed));
-  let stopped: StopReason | undefined;
-  // The rounds run one at a time from the intervals the round before left, so a round that is refused or fails keeps what the
-  // earlier ones found; the first pass sends nothing (adjacent rows need no text).
-  let search = await findIntroduction(series, fetchTexts, { rounds: 0, probes: PROBES });
-  for (let round = 0; round < rounds && Object.keys(search.between).length > 0; round++) {
-    try {
-      search = await findIntroduction(series, fetchTexts, { rounds: 1, probes: PROBES, state: search.state });
-    } catch (e) {
-      if (e instanceof CallStopped) stopped = e.reason;
-      else if (isToolError(e)) partials.push(partialLine(PARTIAL.probes, e));
-      else throw e;
-      break;
-    }
-  }
-  if (stopped === undefined && rounds < PROBE_ROUNDS && Object.keys(search.between).length > 0) stopped = "request cap";
+  // A round that fails keeps what the earlier ones found, under a Partial line.
+  const searched = await introductionRounds(series, fetchTexts, ctx);
+  const { search } = searched;
+  let stopped = searched.stopped;
+  if (searched.error !== undefined) partials.push(partialLine(PARTIAL.probes, searched.error));
   for (const { s, rows } of added) s.verdict = introVerdict(s, rows, search);
   // An edit is named only once its page holds the phrase: the search takes the newest version to hold it, and may not have read it.
   // A text already read costs nothing; the rest need one request, which a stop or the request cap may refuse.
@@ -616,7 +582,7 @@ async function checkHistories(shown: readonly Shown[], ask: Ask, ctx: CallContex
     let texts: ReadonlyMap<string, string> = new Map();
     if (stopped === undefined) {
       try {
-        const got = await revisionTexts(named.map((n) => n.row.id), owners, PROBE_TASK, ctx, svc);
+        const got = await pageTexts(named.map((n) => n.row.id), owners, PROBE_TASK, ctx, svc);
         texts = got.texts;
         if (got.error !== undefined) partials.push(partialLine(PARTIAL.probes, got.error));
       } catch (e) {
@@ -920,8 +886,7 @@ async function continuation(entry: CursorEntry, p: FirstUseParams, ctx: CallCont
   return pageOf(
     {
       ask, state, pages,
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -941,7 +906,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<FirstUseParams> = {
   name: "first_use",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   required: ["forms"],
   run(p, ctx, svc) {

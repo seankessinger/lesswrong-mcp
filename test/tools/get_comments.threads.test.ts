@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { subjectOps } from "../../src/forum/templates/get_comments";
 import { createCallContext } from "../../src/call/context";
 import { resolve, resolvedFrom } from "../../src/ids/resolve";
 import { CAVEAT } from "../../src/render/messages";
 import { NO_VOTE_DATA_LINE, NO_SIGNALS_LINE } from "../../src/domain/threads";
 import { createHarness, expectClean } from "../support/harness";
 import { smallAgiRuinForest, forestEntries, rawCommentTree, rawCommentList, rawCommentRef, rawUserRef, deepThread30, gqlEntry, glmComments as glm, rawPostRef, rawPostCard } from "../support/builders";
+import { subjectOps } from "../../src/tools/get_comments";
 import { loadForest } from "../../src/tools/loaders";
 import { estimateTokens } from "../../src/render/budget";
 import { loadFamilies, type FixtureEntry } from "../support/fixtures";

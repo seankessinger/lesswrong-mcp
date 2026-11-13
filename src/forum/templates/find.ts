@@ -1,11 +1,11 @@
 // Layer 4. The ops of `find`'s one GraphQL request (¶4.1 step 3), composed from the shared builders: the post hits by id and
 // the slug fallback per post item, the user hits and up to three slug guesses per user item, each tag hit by `tag(_id)` (which
 // keeps the wiki-only pages that `tagsByTagIds` drops, Q59) with the tag and lens lookups of each tag item's slug, the sequence
-// hits, the collections listing when it is not cached, and the `commented_on` post by id or by slug. A continuation re-reads
-// its candidates with the same ops (ids only). Pure: no services, caches or domain code.
+// hits, and the collections listing when it is not cached (the tool adds the `commented_on` post and the identifier items, from
+// `ids/resolve`). A continuation re-reads its candidates with the same ops (ids only). Pure: no services, caches or domain code.
 import type { GqlOp } from "../../types";
 import {
-  collectionsListingOp, postByIdOp, postsByIdsOp, postsBySlugOp, sequencesByIdsOp, tagByIdOp, tagBySlugOp, tagPreviewOp, usersByIdsOp,
+  collectionsListingOp, postsByIdsOp, postsBySlugOp, sequencesByIdsOp, tagByIdOp, tagBySlugOp, tagPreviewOp, usersByIdsOp,
   userBySlugOp,
 } from "./shared";
 
@@ -18,7 +18,6 @@ export interface FindHydratePlan {
   tagSlugs: string[];
   sequenceIds: string[];
   collections: boolean;
-  commentedOn?: { id?: string; slug?: string };
 }
 
 /** The k-th (0-based) alias of a family: `ps`, `ps2`, `ps3`, … */
@@ -35,7 +34,7 @@ export const findAlias = {
 
 /**
  * The hydrate ops in this order, each part only when it has something to read: `p`, `ps…`, `u`, `ug1…`, `t1…` (one per distinct
- * tag id), `ts…`/`tp…` (a pair per tag slug), `s`, `col`, then `co` (the `commented_on` id) and `cs` (its slug).
+ * tag id), `ts…`/`tp…` (a pair per tag slug), `s`, `col`.
  */
 export function findHydrateOps(plan: FindHydratePlan): GqlOp[] {
   const ops: GqlOp[] = [];
@@ -53,7 +52,5 @@ export function findHydrateOps(plan: FindHydratePlan): GqlOp[] {
   });
   push(sequencesByIdsOp("s", plan.sequenceIds, "...SEQ_CARD"));
   if (plan.collections) push(collectionsListingOp("col"));
-  if (plan.commentedOn?.id !== undefined) push(postByIdOp("co", plan.commentedOn.id, "...POST_CARD"));
-  if (plan.commentedOn?.slug !== undefined) push(postsBySlugOp("cs", plan.commentedOn.slug, "...POST_CARD"));
   return ops;
 }

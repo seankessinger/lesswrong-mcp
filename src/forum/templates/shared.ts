@@ -9,7 +9,7 @@
 import { CONFIG } from "../../config";
 import { internalError } from "../../errors";
 import type { GqlOp, PublicDocId, PublicPostId, PublicRevisionId, PublicSequenceId, PublicTagId } from "../../types";
-import { enumTerm, idLit, int, list, str } from "../literal";
+import { DATE_LITERAL_RE, enumTerm, idLit, int, list, str } from "../literal";
 import { op, type OpSpec } from "./op";
 
 // Explicit limits (R2) of the ¶4 templates that have no entry in CONFIG.
@@ -24,7 +24,6 @@ const REVIEWS_LIMIT = 50;
 export const CORE_GROUPING_LIMIT = 500;
 
 const LEGACY_ID_RE = /^[0-9a-z]+$/;
-const DATE_BOUND_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const REVISION_FIELDS = ["contents", "description"] as const;
 
 const resultOf = (fields: string): string => `{ result { ${fields} } }`;
@@ -40,8 +39,9 @@ function legacyIdLit(template: string, legacyId: string): string {
   return str(legacyId, "legacy id");
 }
 
-function dateBoundLit(template: string, bound: string): string {
-  if (!DATE_BOUND_RE.test(bound)) throw internalError(template, "not a YYYY-MM-DDTHH:MM:SS.SSSZ date");
+/** A date bound as a literal, refused unless it is exactly YYYY-MM-DDTHH:MM:SS.SSSZ. */
+export function dateBoundLit(template: string, bound: string): string {
+  if (!DATE_LITERAL_RE.test(bound)) throw internalError(template, "not a YYYY-MM-DDTHH:MM:SS.SSSZ date");
   return str(bound, "date");
 }
 

@@ -2,16 +2,23 @@
 // ¶3.6 "Conflicting parameters"), the arguments a cursor stores, resolving the identifier filters of a list or search in one
 // request, the request-echo setting items (¶3.7), one rendered reply page, minting a cursor, hand-off calls printed whole
 // (¶3.6: `list_posts {tag: "…", sort: "top", cursor: "c_…"}`), the position and `next:` texts, the date echo and the period
-// an empty template names, and the two readers of a GraphQL answer's shape (`isRecord`, `rowsOf`).
-import { parseRef } from "../ids/parse";
+// an empty template names, the two readers of a GraphQL answer's shape (`isRecord`, `rowsOf`), a search hit's id
+// (`searchHitId`), and what a continuation resumes from (`resumedFrom`).
+import { isEntityId, parseRef } from "../ids/parse";
 import { cachedResolution, readResolution, resolutionOps } from "../ids/resolve";
 import { checkCursorParams } from "../paging/cursor";
 import { renderPage } from "../render/layout";
 import { fmtInt } from "../render/messages";
 import { clampNote, day, isoMs } from "../text/dates";
 import type {
-  CallContext, Consumed, CursorEntry, CursorState, DateRange, Footer, PageSpec, ParsedRef, Resolved, Services, ToolName, ToolOutput,
+  CallContext, Consumed, CursorEntry, CursorState, DateRange, Footer, PageSpec, ParsedRef, Resolved, SearchHit, Services, ToolName, ToolOutput,
 } from "../types";
+
+/** A search hit's id: its `_id` when the hit carries one, else its `objectID`; undefined unless that is an entity id. */
+export function searchHitId(hit: SearchHit): string | undefined {
+  const id = typeof hit._id === "string" ? hit._id : hit.objectID;
+  return typeof id === "string" && isEntityId(id) ? id : undefined;
+}
 
 /** A plain object (not null, not an array): the shape of every GraphQL document and of a `{ results }` answer. */
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -39,6 +46,14 @@ export function checkContinuation(entry: CursorEntry, givenEffective: Readonly<R
     if (key !== "cursor" && key !== "max_tokens" && Object.hasOwn(givenEffective, key)) compared[key] = givenEffective[key];
   }
   checkCursorParams(entry, compared);
+}
+
+/**
+ * ¶3.6, ¶3.7: what a continuation carries over from its cursor. The stored arguments count as given, so the echo marks
+ * `(default)` only what neither call gave; the arguments and effective values are copied for the next cursor.
+ */
+export function resumedFrom(entry: CursorEntry, ctx: CallContext): { echo: CallContext; args: Record<string, unknown>; effective: Record<string, unknown> } {
+  return { echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) }, args: { ...entry.args }, effective: { ...entry.effective } };
 }
 
 /** The arguments a cursor stores for the echo: the parameters the call gave, in `p`'s (schema) order, without `cursor` and `max_tokens`. */

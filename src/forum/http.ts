@@ -33,7 +33,7 @@ interface SessionEntry {
 /** Bytes per tenth of a megabyte (1 MB = 1,048,576 bytes, D13): a session's bytes are reported to one decimal. */
 const TENTH_MB = 104857.6;
 
-/** S1: the only URLs this server ever sends to; a config naming any other is refused when the transport is built. */
+/** S1: the only URLs this server ever sends to. */
 const ALLOWED_URLS = {
   graphql: "https://www.lesswrong.com/graphql",
   search: "https://www.lesswrong.com/api/search",
@@ -157,9 +157,6 @@ function noteKey(ctx: CallContext, key: string): void {
 
 export function createHttp(deps: HttpDeps): Http {
   const { config } = deps;
-  if (config.graphqlUrl !== ALLOWED_URLS.graphql || config.searchUrl !== ALLOWED_URLS.search) {
-    throw internalError("http", "endpoint not allowed");
-  }
 
   // Process-wide state, one set per transport.
   const gate = createGate();
@@ -287,7 +284,7 @@ export function createHttp(deps: HttpDeps): Http {
       redirect: "manual",
       signal: controller.signal,
     };
-    const url = req.endpoint === "graphql" ? config.graphqlUrl : config.searchUrl;
+    const url = ALLOWED_URLS[req.endpoint];
     const start = deps.now();
     const read: Read = { bytes: 0 };
     try {

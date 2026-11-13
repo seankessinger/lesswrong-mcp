@@ -221,6 +221,18 @@ describe("get_post", () => {
     const h = createHarness({ families: FAMS }); h.forum.inject({ endpoint: "graphql", when: (b) => b.includes("SequenceChapters"), delayMs: 41_000 });
     expect((await h.call("get_post", { post: "pwLastPost0000001" })).text).toMatch(/Stopped early \(time limit\); call get_post with cursor "c_[A-Za-z0-9_-]{22}" to continue\.$/);
   });
+  it("¶2.2 step 5 past 40 s request 3 is not sent at all: not even an answer an earlier call left in the cache is used", async () => {
+    const h = createHarness({ families: FAMS });
+    await h.call("get_post", { post: "pwLastPost0000001" });
+    expect(h.forum.requests).toHaveLength(3);
+    // Request 2 is sent again (the collections listing, now cached, no longer rides along) and answers after 41 s.
+    h.forum.inject({ endpoint: "graphql", when: (b) => b.includes("ch: chapters"), delayMs: 41_000 });
+    const out = (await h.call("get_post", { post: "pwLastPost0000001" })).text;
+    expect(h.forum.requests).toHaveLength(4);
+    expect(out.split("\n")).toContain('Canonical sequence: "Predictably Wrong" (sequence_id 5g5TkQTe9rmPS5vvM) · previous: "Preface" (post_id pwFirstPost000001, LW only)');
+    expect(out).not.toContain("in the next sequence of rationality");
+    expect(out).toMatch(/Stopped early \(time limit\); call get_post with cursor "c_[A-Za-z0-9_-]{22}" to continue\.$/);
+  });
 
   // The continuation rules, the stop's cursor, request 3's Partial line and the body cache.
   it("¶3.6 a stopped first page continues as the first page again, now with the boundary neighbour and the body", async () => {
@@ -245,7 +257,7 @@ describe("get_post", () => {
     const out = await h.call("get_post", { post: "pwLastPost0000001", include_body: false });
     expect(out.isError).toBe(false);
     expect(out.text).toContain('Canonical sequence: "Predictably Wrong" (sequence_id 5g5TkQTe9rmPS5vvM) · previous: "Preface" (post_id pwFirstPost000001, LW only)\n');
-    expect(out.text).toContain("Partial: neighbouring sequence unavailable (forum_error: Something went wrong).");
+    expect(out.text.match(/^Partial: .*$/gm)).toEqual(["Partial: neighbouring sequence unavailable (forum_error: Something went wrong)."]);
   });
   it("¶2.3 the processed body is cached as <postId>@<version>", async () => {
     const h = createHarness({ families: FAMS });

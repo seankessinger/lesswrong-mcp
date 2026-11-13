@@ -24,21 +24,20 @@ import {
 import { badInput, internalError, isToolError } from "../errors";
 import { buildSearch, estimateBytes } from "../forum/search";
 import { findAlias, findHydrateOps, type FindHydratePlan } from "../forum/templates/find";
-import { isEntityId, parseLink, parseRef, slugify } from "../ids/parse";
+import { parseLink, parseRef, slugify } from "../ids/parse";
 import { readResolution, rememberResolution, resolutionOps, resolvedFrom } from "../ids/resolve";
 import { fingerprint, listPage } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { CAVEAT, emptyText, errorText, fmtInt } from "../render/messages";
 import { postLine, seqRefText, sequenceLine, tagCard, userCard } from "../render/records";
 import { foldForMatch, sanitizeQuery } from "../text/phrases";
 import { oneLine } from "../text/sanitize";
 import type {
-  AliasResults, CallContext, Category, CollectionSlug, Consumed, CursorEntry, Facet, Footer, Forest, GqlOp, PageItem, ParsedRef, Person,
-  RawBook, RawCollection,
-  RawMdocRef, RawPostCard, RawPostFull, RawSeqCard, RawTagCard, RawUserCard, Resolved, SearchIndex, SearchSpec, Services, StreamState,
-  ToolDef, ToolOutput,
+  AliasResults, CallContext, Category, CollectionSlug, Consumed, CursorEntry, Facet, Footer, Forest, GqlOp, PageItem, ParsedRef,
+  RawBook, RawCollection, RawMdocRef, RawPostCard, RawPostFull, RawSeqCard, RawTagCard, RawUserCard, Resolved, SearchIndex,
+  SearchSpec, Services, StreamState, ToolDef, ToolOutput, UserPerson,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, reply, setting } from "./common";
+import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, reply, resumedFrom, searchHitId, setting } from "./common";
 import { aliasData, collectionsCached, loadCollectionsListing, loadForest } from "./loaders";
 
 interface FindItem { kind: "post" | "user" | "tag" | "sequence"; query: string; commented_on?: string }
@@ -47,7 +46,6 @@ type FindParams = { items?: FindItem[]; af_only: boolean; limit: number; cursor?
 type ItemKind = FindItem["kind"];
 type CandKind = "post" | "user" | "tag" | "sequence" | "collection" | "book";
 type ListState = Extract<StreamState, { kind: "list" }>;
-type UserPerson = Extract<Person, { kind: "user" }>;
 type Role = "main" | "wiki" | "alias";
 
 /**
@@ -154,7 +152,7 @@ const AF_FACET: Facet = { field: "af", value: true };
 const WIKI_ONLY: Facet = { field: "wikiOnly", value: true };
 /** The selections of an identifier item's resolution. */
 const IDENTIFIER_SELECT = { post: "...POST_CARD", user: "...USER_CARD", tag: "...TAG_CARD", sequence: "...SEQ_CARD" } as const;
-/** The `commented_on` post read like a resolution, its aliases `co`/`cs` (and `cl` for an LW1 link) seen as `cp`/`cs`/`cl`. */
+/** The `commented_on` post is asked and read like a resolution, with its aliases prefixed `c` (`cp`, `cs`, `cl`). */
 const COMMENTED_ON_PREFIX = "c";
 const HIDDEN_CATEGORIES: ReadonlySet<Category> = new Set(["not_found", "not_public", "login_only"]);
 
@@ -379,8 +377,8 @@ function postOutcome(it: FindItem, hits: readonly string[], slugRows: readonly R
 function commentersOf(forest: Forest): Map<string, { person: UserPerson; count: number }> {
   const found = new Map<string, { person: UserPerson; count: number }>();
   for (const node of forest.byId.values()) {
+    if (!attributable(node.c)) continue;
     const author = node.c.author;
-    if (!attributable(node.c) || author.kind !== "user") continue;
     const seen = found.get(author.id);
     if (seen !== undefined) seen.count += 1;
     else found.set(author.id, { person: author, count: 1 });
@@ -619,13 +617,8 @@ function tagsById(results: AliasResults, ids: readonly string[], ctx: CallContex
 
 /** The `commented_on` post read like a resolution (P17): its document, or `undefined` when it is not publicly visible. */
 function commentedOnPost(ref: ParsedRef, results: AliasResults, ctx: CallContext, svc: Services): RawPostCard | undefined {
-  const seen: [string, string][] = [["co", "cp"], ["cs", "cs"], ["cl", "cl"]];
-  const view: AliasResults = new Map(seen.flatMap(([from, to]) => {
-    const r = results.get(from);
-    return r === undefined ? [] : [[to, r] as const];
-  }));
   try {
-    return readResolution(ref, "commented_on", COMMENTED_ON_PREFIX, view, ctx, svc).doc as RawPostCard;
+    return readResolution(ref, "commented_on", COMMENTED_ON_PREFIX, results, ctx, svc).doc as RawPostCard;
   } catch (e) {
     if (isToolError(e) && HIDDEN_CATEGORIES.has(e.category)) return undefined;
     throw e;
@@ -651,8 +644,8 @@ async function firstPage(p: FindParams, ctx: CallContext, svc: Services): Promis
     planned.forEach((x, i) => {
       const into = hits[x.item - 1]![x.role];
       for (const hit of answers[i]?.hits ?? []) {
-        const id = typeof hit._id === "string" ? hit._id : hit.objectID;
-        if (isEntityId(id) && !into.includes(id)) into.push(id);
+        const id = searchHitId(hit);
+        if (id !== undefined && !into.includes(id)) into.push(id);
       }
     });
     // Hits as the forum sent them, repeats included, because that is what it counts. The wiki-only query reads a few of what the
@@ -690,11 +683,7 @@ async function firstPage(p: FindParams, ctx: CallContext, svc: Services): Promis
     sequenceIds: ofKind("sequence", ["main", "alias"]),
     collections: items.some((it) => it.kind === "sequence") && !collectionsCached(svc),
   };
-  const extra: GqlOp[] = [];
-  if (explicit?.form === "id") plan.commentedOn = { id: explicit.value };
-  else if (explicit?.form === "slug") plan.commentedOn = { slug: explicit.value };
-  else if (explicit?.form === "idOrSlug") plan.commentedOn = { id: explicit.value, slug: explicit.value };
-  else if (explicit !== undefined) extra.push(...resolutionOps(explicit, COMMENTED_ON_PREFIX, { post: "...POST_CARD" }));   // an LW1 link
+  const extra: GqlOp[] = explicit === undefined ? [] : resolutionOps(explicit, COMMENTED_ON_PREFIX, { post: "...POST_CARD" });
   refs.forEach((ref, i) => {
     if (ref !== undefined) extra.push(...resolutionOps(ref, `r${i + 1}`, IDENTIFIER_SELECT));
   });
@@ -937,9 +926,9 @@ async function continuation(entry: CursorEntry, p: FindParams, ctx: CallContext,
   const from = first !== undefined && visible[start] === first ? data.from : undefined;
   return render({
     // The echo marks `(default)` only what neither the first call nor this one gave.
-    items: effective.items, afOnly: effective.af_only, limit: effective.limit, echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
+    items: effective.items, afOnly: effective.af_only, limit: effective.limit, ...resumedFrom(entry, ctx),
     rows: visible, heads: data.heads, ...(data.more !== undefined && { more: data.more }), docs, failures, expansions: findSearchSpecs(effective.items, effective.limit, effective.af_only).expansions,
-    args: { ...entry.args }, effective: { ...entry.effective }, state, from,
+    state, from,
   }, p.max_tokens, svc);
 }
 
@@ -1097,7 +1086,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<FindParams> = {
   name: "find",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   required: ["items"],
   run(p, ctx, svc) {

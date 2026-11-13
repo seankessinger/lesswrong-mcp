@@ -26,23 +26,25 @@ import {
 import { maskPostRef, maskTagRef, wikiEditPage } from "../domain/visibility";
 import { badInput, CallStopped, forumError, internalError, notFound, ToolError } from "../errors";
 import { historyDocOps } from "../forum/templates/get_history";
-import { revisionListOp, revisionTextOp } from "../forum/templates/shared";
+import { revisionListOp } from "../forum/templates/shared";
 import { parseRef } from "../ids/parse";
-import { echoOf, negativeKey, readResolution, resolve } from "../ids/resolve";
+import { echoOf, readResolution, resolve, throwRemembered } from "../ids/resolve";
 import { fingerprint, listPage, sliceAfter, slicePosition } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { CAVEAT, driftNote, emptyText, fmtInt, matchLine } from "../render/messages";
 import { matchHitItem, postRefText, revisionLine, tagRefText, wikiEditPageText } from "../render/records";
 import { day, isoMs } from "../text/dates";
 import { classify, contains } from "../text/phrases";
 import { blockText, oneLine } from "../text/sanitize";
 import type {
-  AliasResult, AliasResults, CallContext, ClassifiedPhrase, Consumed, CursorEntry, CursorState, Fingerprint, Footer, GqlOp, PageItem,
+  CallContext, ClassifiedPhrase, Consumed, CursorEntry, CursorState, Fingerprint, Footer, GqlOp, PageItem,
   PageSpec, ParsedRef, PublicDocId, RawMdocRef, RawPostRef, RawRevRow, RawTagRef, Resolved, RevisionDoc, RevisionRecord,
   Services, StopReason, StreamState, ToolDef, ToolOutput,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, rowsOf, setting } from "./common";
-import { aliasData, loadUserWikiEdits, noPage, postText, readRevisions } from "./loaders";
+import {
+  checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, resumedFrom, rowsOf, setting,
+} from "./common";
+import { aliasData, failureOf, introductionRounds, loadUserWikiEdits, noPage, revisionTexts } from "./loaders";
 
 export type GetHistoryParams = {
   post?: string; tag?: string; user?: string; revision?: string; compare_to?: string; phrases?: string[]; match?: string;
@@ -82,10 +84,6 @@ const TEXT_TASK = "reading the version texts";
 const DOC_PARAMS: readonly DocParam[] = ["post", "tag"];
 /** ¶4.11 Parameters: with `user`, only `sort`, `limit`, `cursor` and `max_tokens` apply; these are refused, in this order. */
 const NOT_WITH_USER = ["revision", "compare_to", "phrases", "match"] as const satisfies readonly (keyof GetHistoryParams)[];
-/** Request 1's aliases and the bare aliases `ids/resolve` reads them by. */
-const RESOLVE_ALIASES: readonly (readonly [string, string])[] = [
-  ["p", "p"], ["ps", "s"], ["pl", "l"], ["c", "c"], ["cl", "c"], ["t", "t"], ["m", "m"], ["lp", "b"],
-];
 
 const TITLE_CAP = CONFIG.render.caps.title;
 const VERSION_CAP = 40;
@@ -107,9 +105,6 @@ const EMPTY_TEXT = "This version has no text.";
 /** ¶4.11 Errors and empty results: a document whose every stored row is hidden. */
 const NO_VERSIONS = emptyText({ kind: "subject", what: "versions of", subject: "this text" });
 
-/** ¶4.11 step 8: at most this many rounds of the phrase search per call, each one request of up to `PROBES` texts. */
-const PHRASE_ROUNDS = 2;
-const PROBES = 10;
 /** ¶4.11 step 8: the verdict of a phrase found in the original, by what the original is. */
 const AT_PUBLICATION = "present at publication";
 const IN_SNAPSHOT = "present in the oldest kept text (a February-2019 snapshot); original wording not recorded";
@@ -246,41 +241,23 @@ async function loadVersions(
 
 /**
  * ¶4.11 step 6, P17, Q71: the text of revisions `ids`, each one of `list.rows` (anything else is a bug of the caller, refused
- * before anything is sent). Cached texts (`revtext`, 6 hours) cost nothing; the rest are fetched in one request, `r1`…`rN` in
- * the order given. A revision the forum no longer returns, or one of another document, is left out of the map. The cache is
- * keyed by the revision whose page was read (a post row's folded image copy, else the row), as first_use keys it, so the two
- * tools never serve each other a different page under one id.
+ * before anything is sent), read by `revisionTexts` (the `revtext` cache, then one request). A revision the forum no longer
+ * returns, or one of another document, is left out of the map; any other problem is the call's error. `speakers`: a named
+ * dialogue's text with its speakers named (#65).
  */
 export async function loadTexts(
   ids: readonly string[], list: VersionList, ctx: CallContext, svc: Services, speakers = false,
 ): Promise<ReadonlyMap<string, string>> {
-  // #65: a text with its speakers named is cached apart from the same version's text without them (phrases read that one).
-  const key = (id: string): string => (speakers ? `${id}#speakers` : id);
   const visible = new Set(list.rows.map((r) => r.id));
   if (ids.some((id) => !visible.has(id))) throw internalError("get_history", "revision text requested outside the visible list");
   const post = list.doc.kind === "post";
   // A post's text comes from the image copy folded into its row, if any: the same words, on the page the forum last stored. A
   // wiki page's or lens's copy rewrites only its html, so the markdown read here is the row's own (convertImagesInObject).
   const sourceOf = (id: string): string => (post ? list.rows.find((r) => r.id === id)?.textId : undefined) ?? id;
-  const texts = new Map<string, string>();
-  const missing: string[] = [];
-  for (const id of new Set(ids)) {
-    const cached = svc.caches.get<string>("revtext", key(sourceOf(id)));
-    if (cached === undefined) missing.push(id);
-    else texts.set(id, cached);
-  }
-  if (missing.length === 0) return texts;
-  const ops = missing.map((id, i) => revisionTextOp(`r${i + 1}`, ctx.confirmPublic("revision", sourceOf(id)), post));
-  const results = await readRevisions(ops, TEXT_TASK, ctx, svc);
-  missing.forEach((id, i) => {
-    const data = aliasData(results, `r${i + 1}`, TEXT_TASK, ctx);
-    const result = isRecord(data) ? data.result : undefined;
-    if (!isRecord(result) || result._id !== sourceOf(id) || result.documentId !== list.doc.id) return;
-    const text = post ? postText(result, speakers) : typeof result.markdown === "string" ? result.markdown : "";
-    if (text === undefined) throw noPage();
-    svc.caches.set("revtext", key(sourceOf(id)), text);
-    texts.set(id, text);
-  });
+  const wanted = ids.map((id) => ({ id, source: sourceOf(id), docId: list.doc.id }));
+  const { texts, error } = await revisionTexts(wanted, { post, speakers }, TEXT_TASK, ctx, svc);
+  if (error === "no page") throw noPage();
+  if (error !== undefined) throw failureOf(error, TEXT_TASK, ctx);
   return texts;
 }
 
@@ -306,16 +283,6 @@ interface Opened {
  * its versions. Every mode says so under its history line.
  */
 const DEBATE_HISTORY = "Old-style debate post: its history is that of the post's own body, where the debate editor asked authors to write their first dialogue comment; its page shows the debate turns in its place.";
-
-/** Request 1's answers under the bare aliases `ids/resolve` reads. */
-function resolveAnswers(results: AliasResults): AliasResults {
-  const answers = new Map<string, AliasResult>();
-  for (const [from, to] of RESOLVE_ALIASES) {
-    const answer = results.get(from);
-    if (answer !== undefined) answers.set(to, answer);
-  }
-  return answers;
-}
 
 /** The parse notes of the caller's reference, after ` · `, as `echoOf` prints notes. */
 const notesOf = (ref: ParsedRef): string => (ref.notes.length > 0 ? `${SEP}${ref.notes.join(SEP)}` : "");
@@ -374,10 +341,9 @@ function openedFrom(param: DocParam, ref: ParsedRef, resolved: Resolved, ctx: Ca
  * Unknown or hidden → `not_found`, refused → `not_public` (resolve's wording, eviction and negative cache).
  */
 async function openDocument(param: DocParam, ref: ParsedRef, ctx: CallContext, svc: Services): Promise<Opened> {
-  const negative = svc.caches.get<{ category: ToolError["category"]; message: string }>("negative", negativeKey(ref));
-  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
+  throwRemembered(ref, svc);
   const results = await svc.gql(historyDocOps(ref, param), ctx, DOC_TASK);
-  return openedFrom(param, ref, readResolution(ref, param, "", resolveAnswers(results), ctx, svc), ctx);
+  return openedFrom(param, ref, readResolution(ref, param, "", results, ctx, svc), ctx);
 }
 
 // what was asked
@@ -691,11 +657,6 @@ interface TextIds { rev: string; cmp?: string }
 /** The part of a text or diff page below its head lines. */
 type TextBody = Pick<PageSpec, "notes" | "items" | "position">;
 
-function textIdsOf(data: unknown): TextIds | undefined {
-  if (!isRecord(data) || typeof data.rev !== "string") return undefined;
-  return { rev: data.rev, ...(typeof data.cmp === "string" && { cmp: data.cmp }) };
-}
-
 async function textMode(x: PageInput, start: SliceState | undefined, ids: TextIds | undefined, maxTokens: number, ctx: CallContext, svc: Services): Promise<ToolOutput> {
   const { opened, ask } = x;
   const request = requestEcho(opened, ask, x.echo);
@@ -768,16 +729,12 @@ const sameFingerprint = (a: Fingerprint, b: Fingerprint): boolean => a.count ===
  * list's fingerprint is unchanged and every interval lies inside it; otherwise undefined, and the search starts again.
  */
 function carriedIntervals(cont: PhraseCursor | undefined, now: Fingerprint, rows: number): IntroState | undefined {
-  if (cont?.fingerprint === undefined || !sameFingerprint(cont.fingerprint, now) || !isRecord(cont.intervals)) return undefined;
-  const state: IntroState = {};
-  for (const [key, interval] of Object.entries(cont.intervals)) {
-    if (!isRecord(interval)) return undefined;
-    const { lo, hi } = interval;
-    if (typeof lo !== "number" || typeof hi !== "number" || !Number.isInteger(lo) || !Number.isInteger(hi)) return undefined;
-    if (lo < 0 || lo >= hi || hi >= rows) return undefined;
-    state[key] = { lo, hi };
-  }
-  return state;
+  if (cont?.fingerprint === undefined || !sameFingerprint(cont.fingerprint, now) || cont.intervals === undefined) return undefined;
+  const intervals = cont.intervals as IntroState;   // only this tool mints these cursors
+  // The list can change length under the same fingerprint (a reset posting date picks another baseline), so every interval must
+  // still index `rows`.
+  for (const { lo, hi } of Object.values(intervals)) if (lo < 0 || lo >= hi || hi >= rows) return undefined;
+  return { ...intervals };
 }
 
 /** A phrase search's cursor state: one `list` stream with the list's fingerprint, and the intervals once the search has begun. */
@@ -865,20 +822,11 @@ async function phraseMode(x: PageInput, cont: PhraseCursor | undefined, maxToken
   if (added.length > 0) {
     const series: IntroSeries[] = [{ key: doc.id, rows, phrases: added }];
     const fetchTexts = (ids: readonly string[]): Promise<ReadonlyMap<string, string>> => loadTexts(ids, list, ctx, svc);
-    const rounds = Math.max(0, Math.min(PHRASE_ROUNDS, ctx.maxRequests - ctx.requestsUsed));
-    // The rounds run one at a time from the intervals the round before left (the cursor's to begin with), so a round refused by
-    // the cap or the 40 s mark keeps what the earlier ones narrowed; the first pass sends nothing (adjacent rows need no text).
-    search = await findIntroduction(series, fetchTexts, { rounds: 0, probes: PROBES, ...(carried !== undefined && { state: carried }) });
-    for (let round = 0; round < rounds && Object.keys(search.between).length > 0; round++) {
-      try {
-        search = await findIntroduction(series, fetchTexts, { rounds: 1, probes: PROBES, state: search.state });
-      } catch (e) {
-        if (!(e instanceof CallStopped)) throw e;
-        stop = e.reason;
-        break;
-      }
-    }
-    if (stop === undefined && rounds < PHRASE_ROUNDS) stop = "request cap";
+    // From the cursor's intervals, if any; a round that fails fails the call.
+    const searched = await introductionRounds(series, fetchTexts, ctx, carried);
+    if (searched.error !== undefined) throw searched.error;
+    search = searched.search;
+    stop = searched.stopped;
   }
   for (const phrase of added) {
     const key = `${doc.id}|${phrase.given}`;
@@ -1006,8 +954,7 @@ async function userContinuation(entry: CursorEntry, p: GetHistoryParams, ctx: Ca
   const state = entry.state.streams[entry.state.current];
   if (state === undefined || state.kind !== "list") throw internalError("get_history", "a wiki-edit cursor without a list state");
   const x: UserInput = {
-    person, sort: stored.sort, limit: stored.limit, echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-    args: { ...entry.args }, effective: { ...entry.effective },
+    person, sort: stored.sort, limit: stored.limit, ...resumedFrom(entry, ctx),
   };
   return userMode(x, state, p.max_tokens, ctx, svc);
 }
@@ -1056,7 +1003,7 @@ async function continuation(entry: CursorEntry, p: GetHistoryParams, ctx: CallCo
     limit: stored.limit,
   };
   const x: PageInput = {
-    opened, ask, echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) }, args: { ...entry.args }, effective: { ...entry.effective },
+    opened, ask, ...resumedFrom(entry, ctx),
   };
   const state = entry.state.streams[entry.state.current];
   if (ask.phrases !== undefined) {
@@ -1069,7 +1016,7 @@ async function continuation(entry: CursorEntry, p: GetHistoryParams, ctx: CallCo
     return listMode(x, state, p.max_tokens, ctx, svc);
   }
   if (state === undefined || state.kind !== "slice") throw internalError("get_history", "a text cursor without a slice state");
-  const ids = textIdsOf(entry.state.data);
+  const ids = entry.state.data as TextIds | undefined;   // a text page's cursor holds its TextIds (only this tool mints them)
   return textMode(x, ids === undefined ? undefined : state, ids, p.max_tokens, ctx, svc);
 }
 
@@ -1092,7 +1039,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetHistoryParams> = {
   name: "get_history",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   oneOf: [["post", "tag", "user"]],
   run(p, ctx, svc) {

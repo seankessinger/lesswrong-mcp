@@ -21,25 +21,29 @@ import {
 } from "../domain/sequences";
 import { sequenceUrl } from "../domain/urls";
 import { maskPostRef, maskSeqRef, sequencePublic } from "../domain/visibility";
-import { badInput, CallStopped, internalError, isToolError, ToolError } from "../errors";
-import { collectionOp, getSequenceRequest1Ops, getSequenceRequest2Ops } from "../forum/templates/get_sequence";
+import { badInput, internalError, ToolError } from "../errors";
+import { collectionOp, getSequenceRequest1Ops, getSequenceRequest2Ops, MARKED_POST_FIELDS } from "../forum/templates/get_sequence";
 import { sequenceChaptersOp } from "../forum/templates/shared";
 import { collectionPagePath, parseRef } from "../ids/parse";
-import { cachedResolution, echoOf, negativeKey, readResolution, resolve } from "../ids/resolve";
+import { cachedResolution, echoOf, readResolution, resolutionOps, resolve, throwRemembered } from "../ids/resolve";
 import { fingerprint, listPage } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { Budget, estimateTokens, sliceText } from "../render/budget";
 import { fence, renderPage } from "../render/layout";
-import { CAVEAT, CUT_IN_CODE, emptyText, FLAG, fmtInt, partialLine } from "../render/messages";
-import { personText, postLine, postRefText, seqRefText, sequenceLine } from "../render/records";
+import { CAVEAT, CUT_IN_CODE, emptyText, FLAG, fmtInt } from "../render/messages";
+import { counted, personText, postLine, postRefText, seqRefText, sequenceLine } from "../render/records";
 import { blockText, oneLine } from "../text/sanitize";
 import type {
-  AliasResult, AliasResults, CallContext, CollectionSlug, Consumed, CursorEntry, Footer, PageItem, PageSpec, ParsedRef, PublicSequenceId,
+  AliasResults, CallContext, CollectionSlug, Consumed, CursorEntry, Footer, PageItem, PageSpec, ParsedRef, PublicSequenceId,
   RawBook, RawChapter, RawCollection, RawPostCard, RawSeqCard, RawSeqRef, Resolved, SequenceRecord, Services, StreamState, ToolDef,
   ToolOutput,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, rowsOf, setting } from "./common";
-import { aliasData, bookSequenceRow, collectionsCached, crossText, DIR_WORD, loadCollectionsListing, UNORDERED, type Dir } from "./loaders";
+import {
+  checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, resumedFrom, rowsOf, setting,
+} from "./common";
+import {
+  aliasData, aliasPart, bookSequenceRow, collectionsCached, crossText, DIR_WORD, loadCollectionsListing, partOf, send, UNORDERED, type Dir,
+} from "./loaders";
 
 type GetSequenceParams = { sequence?: string; post?: string; af_only: boolean; limit: number; cursor?: string; max_tokens: number };
 
@@ -69,8 +73,6 @@ const NEIGHBOUR_ALIAS: Readonly<Record<Dir, string>> = { prev: "ach_prev", next:
 const NEIGHBOUR_FIELDS = "_id number posts { ...POST_REF postedAt }";
 
 const titleText = (s: string | null | undefined): string => `"${oneLine(s, TITLE_CAP)}"`;
-/** A whole count with its noun: `1 chapter`, `3 chapters`. */
-const counted = (n: number, one: string): string => `${fmtInt(n)} ${n === 1 ? one : `${one}s`}`;
 /** A date's epoch milliseconds for the drift fingerprint; 0 for a missing or unreadable one, so the fingerprint stays comparable. */
 function timeOf(iso: string | null | undefined): number {
   const t = Date.parse(iso ?? "");
@@ -259,16 +261,6 @@ interface Opened {
   post?: MarkedPost;
 }
 
-/** The answers of request 1 that belong to the post, under the aliases `ids/resolve` reads a post by (`p`, `s`, `l`). */
-function postAnswers(results: AliasResults): AliasResults {
-  const answers = new Map<string, AliasResult>();
-  for (const [from, to] of [["p", "p"], ["ps", "s"], ["pl", "l"]] as const) {
-    const answer = results.get(from);
-    if (answer !== undefined) answers.set(to, answer);
-  }
-  return answers;
-}
-
 /** Whether a cached resolution holds the sequence as request 1 selects it, with its description. */
 function hasDescription(doc: unknown): boolean {
   return isRecord(doc) && isRecord(doc.contents) && typeof doc.contents.markdown === "string";
@@ -284,16 +276,16 @@ async function openSequence(ref: ParsedRef, postRef: ParsedRef | undefined, ctx:
   const open = (resolved: Resolved, post?: MarkedPost): Opened => ({
     resolved, doc: resolved.doc as RawSeqCard, id: ctx.confirmPublic("sequence", resolved.id), ...(post !== undefined && { post }),
   });
-  const negative = svc.caches.get<{ category: ToolError["category"]; message: string }>("negative", negativeKey(ref));
-  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
+  throwRemembered(ref, svc);
   if (postRef === undefined) {
     const cached = cachedResolution(ref, ctx, svc);
     if (cached !== undefined && hasDescription(cached.doc)) return open(cached);
   }
-  const results = await svc.gql(getSequenceRequest1Ops(ref.value, postRef), ctx, SEQUENCE_TASK);
+  const postOps = postRef === undefined ? [] : resolutionOps(postRef, "p", { post: MARKED_POST_FIELDS });
+  const results = await svc.gql(getSequenceRequest1Ops(ref.value, postOps), ctx, SEQUENCE_TASK);
   const resolved = readResolution(ref, "sequence", "", results, ctx, svc);
   if (postRef === undefined) return open(resolved);
-  const post = readResolution(postRef, "post", "", postAnswers(results), ctx, svc);
+  const post = readResolution(postRef, "post", "p", results, ctx, svc);
   const canonical = isRecord(post.doc) && isRecord(post.doc.canonicalSequence) ? (post.doc.canonicalSequence as unknown as RawSeqRef) : null;
   return open(resolved, { resolved: post, canonical });
 }
@@ -324,19 +316,6 @@ function checkMarked(post: string | undefined, ref: ParsedRef, opened: Opened): 
 }
 
 // request 2 and the neighbours
-
-/** One part of an answer: its data (undefined when the forum had nothing), or `ok: false` when it failed. */
-type Part = { ok: true; data: unknown } | { ok: false };
-
-/** The part `alias` of `results`; an alias error is that part's `Partial:` line, with the error as the forum gave it. */
-function partOf(results: AliasResults, alias: string, section: string, partials: string[]): Part {
-  const r = results.get(alias);
-  if (r === undefined) return { ok: false };
-  if (!("error" in r)) return { ok: true, data: r.data };
-  if (r.error === "not_found" || r.error === "not_public") return { ok: true, data: undefined };
-  partials.push(partialLine(section, new ToolError(r.error, r.message)));
-  return { ok: false };
-}
 
 /** The site's figures (Q102): rounded, and only a pair of numbers. */
 function statsOf(data: unknown): { words: number; minutes: number } | undefined {
@@ -410,23 +389,18 @@ async function neighbourSides(
   const named = (w: (typeof wanted)[number]): string =>
     `in the ${DIR_WORD[w.dir]} sequence of ${slug}: ${titleText(w.row.title)} (sequence_id ${w.row._id}${w.row.hidden ? `, ${FLAG.HIDDEN_SEQUENCE}` : ""})`;
   for (const w of wanted) sides[w.dir] = named(w);
-  if (!ctx.mayStartRequest()) return { ...sides, stopped: true };
   // P17: an adjacent sequence is a `Book.sequences` row of the listing, so it is confirmed public.
   const ops = wanted.map((w) => sequenceChaptersOp(NEIGHBOUR_ALIAS[w.dir], ctx.confirmPublic("sequence", w.row._id), NEIGHBOUR_FIELDS));
-  let answer: AliasResults;
-  try {
-    answer = await svc.gql(ops, ctx, NEIGHBOUR_TASK);
-  } catch (e) {
-    if (e instanceof CallStopped) return { ...sides, stopped: true };
-    if (!isToolError(e)) throw e;
-    partials.push(partialLine(SECTION.neighbour, e));
-    return sides;
-  }
+  const sent = await send(ops, NEIGHBOUR_TASK, ctx, svc, true);
+  if (sent.kind === "stopped") return { ...sides, stopped: true };
   // One section: request 3 reads both ends, and its failures are one Partial line.
-  const failures: string[] = [];
+  let failure: string | undefined;
   for (const w of wanted) {
-    const part = partOf(answer, NEIGHBOUR_ALIAS[w.dir], SECTION.neighbour, failures);
-    if (!part.ok) continue;
+    const part = partOf(sent, ops, NEIGHBOUR_ALIAS[w.dir], SECTION.neighbour);
+    if (!part.ok) {
+      failure ??= part.partial;
+      continue;
+    }
     const all = readingOrder(rowsOf<RawChapter>(part.data));
     // The site's step reads the adjacent sequence's public posts and goes no further: with none, it shows no link.
     if (all.length === 0) {
@@ -438,7 +412,7 @@ async function neighbourSides(
     const post = w.dir === "next" ? order[0] : order.at(-1);
     if (post !== undefined) sides[w.dir] = crossText(post.post, w.dir, slug!, w.row);
   }
-  if (failures.length > 0) partials.push(failures[0]!);
+  if (failure !== undefined) partials.push(failure);
   return sides;
 }
 
@@ -504,7 +478,7 @@ async function readChapters(
   const listingAsked = wantsPosition && record.collectionSlug !== undefined && !collectionsCached(svc);
   const results = await svc.gql(getSequenceRequest2Ops({ sequenceId: opened.id, listing: listingAsked }), ctx, CHAPTERS_TASK);
   const chapters = rowsOf<RawChapter>(aliasData(results, "ch", CHAPTERS_TASK, ctx));
-  const stats = partOf(results, "st", SECTION.stats, partials);
+  const stats = aliasPart(results, "st", SECTION.stats, partials);
   const figures = stats.ok ? statsOf(stats.data) : undefined;
   return { chapters, results, listingAsked, ...(figures !== undefined && { figures }) };
 }
@@ -538,7 +512,7 @@ async function placeMarked(
   let listing: RawCollection[] | undefined;
   if (record.collectionSlug !== undefined) {
     // A `col` alias that failed has its Partial line already; a listing not asked for is read from the cache, never sent.
-    const readable = read.listingAsked ? partOf(read.results, "col", SECTION.neighbour, partials).ok : collectionsCached(svc);
+    const readable = read.listingAsked ? aliasPart(read.results, "col", SECTION.neighbour, partials).ok : collectionsCached(svc);
     if (readable) listing = await loadCollectionsListing(ctx, svc, read.listingAsked ? read.results : undefined);
   }
   // The ends are those of the whole sequence: af_only removes posts, it does not move the ends.
@@ -672,9 +646,7 @@ async function continuation(entry: CursorEntry, p: GetSequenceParams, ctx: CallC
   const early = { sequence: ref.value, af_only: given.afOnly, limit: given.limit };
   checkContinuation(entry, early, ctx);
   const ask: Ask = { afOnly: stored.af_only, limit: stored.limit };
-  const echo: CallContext = { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) };
-  const args = { ...entry.args };
-  const effective = { ...entry.effective };
+  const { echo, args, effective } = resumedFrom(entry, ctx);
 
   if (ref.form === "collection") {
     if (ctx.given.has("post")) throw collectionWithPost();
@@ -718,7 +690,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetSequenceParams> = {
   name: "get_sequence",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   required: ["sequence"],
   run(p, ctx, svc) {

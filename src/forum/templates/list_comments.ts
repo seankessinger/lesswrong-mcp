@@ -4,9 +4,9 @@
 // exclusive, both `YYYY-MM-DDTHH:MM:SS.SSSZ` (Q11, Q12). The answer is `COMMENT_LIST` rows, or `COMMENT_LIGHT` rows for a light
 // set or an `af_only` scan, with `totalCount` when the page asks for it (bounded selectors only, which here means a `userId`,
 // P10). Pure: no services, caches or domain code.
-import { internalError } from "../../errors";
 import type { GqlOp } from "../../types";
-import { enumTerm, idLit, int, str } from "../literal";
+import { enumTerm, idLit, int } from "../literal";
+import { dateBoundLit } from "./shared";
 import { op } from "./op";
 
 /** The terms of `allRecentComments`, in the order they are written. */
@@ -22,14 +22,9 @@ export interface AllRecentTerms {
 interface Page { limit: number; offset?: number; enableTotal?: true }
 
 const SORT_BY: readonly AllRecentTerms["sortBy"][] = ["new", "old", "top"];
-const DATE_BOUND_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const FIELDS = { list: "...COMMENT_LIST", light: "...COMMENT_LIGHT" } as const;
 
-function dateTerm(template: string, bound: string | undefined): string | undefined {
-  if (bound === undefined) return undefined;
-  if (!DATE_BOUND_RE.test(bound)) throw internalError(template, "not a YYYY-MM-DDTHH:MM:SS.SSSZ date");
-  return str(bound, "date");
-}
+const dateTerm = (template: string, bound: string | undefined): string | undefined => (bound === undefined ? undefined : dateBoundLit(template, bound));
 
 function selection(fields: "list" | "light", page: Page): string {
   return `{ results { ${FIELDS[fields]} }${page.enableTotal ? " totalCount" : ""} }`;

@@ -10,7 +10,7 @@ import {
   ROB_BENSINGER, SAMPLE_PERSON, forestEntries, gqlEntry, manyTagHitsFor, paulCommentsOnAgiRuin, rawCommentTree, rawPostCard, rawSeqCard, rawTagCard, rawTagFull, rawUserCard,
   robCommentsOnAgiRuin, samplePersonEntry, samplePersonOnAgiRuin, searchEntry,
 } from "../support/builders";
-import { printedCursor } from "../support/requests";
+import { gqlTexts, printedCursor } from "../support/requests";
 import { loadFamilies, type FixtureEntry } from "../support/fixtures";
 
 const FAMS = ["posts", "users", "tags", "sequences", "search", "comments"] as const;
@@ -22,8 +22,8 @@ describe("find", () => {
   it("find_graphql: the one hydrate request, exact text and alias rule", () => {
     const text = documentFor("find_graphql", findHydrateOps({ postIds: ["uMQ3cqWDPHhjtiesc", "zHhGa3iQBQcdSifFL"], postSlugs: ["agi-ruin-a-list-of-lethalities"],
       userIds: ["nmk3nLpQE89dMRzzN"], userSlugs: ["paul-christiano", "paulchristiano", "paul_christiano"], tagIds: ["56yXXrcxRjrQs6z9R"], tagSlugs: ["interpretability"],
-      sequenceIds: ["5g5TkQTe9rmPS5vvM"], collections: true, commentedOn: { id: "uMQ3cqWDPHhjtiesc" } }));
-    expect(text.startsWith('query find_graphql { p: posts(selector: {default: {exactPostIds: ["uMQ3cqWDPHhjtiesc", "zHhGa3iQBQcdSifFL"]}}, limit: 2) { results { ...POST_CARD } } ps: posts(selector: {slugPost: {slug: "agi-ruin-a-list-of-lethalities"}}, limit: 2) { results { ...POST_CARD } } u: users(selector: {usersByUserIds: {userIds: ["nmk3nLpQE89dMRzzN"]}}, limit: 1) { results { ...USER_CARD } } ug1: GetUserBySlug(slug: "paul-christiano") { ...USER_CARD } ug2: GetUserBySlug(slug: "paulchristiano") { ...USER_CARD } ug3: GetUserBySlug(slug: "paul_christiano") { ...USER_CARD } t1: tag(selector: {_id: "56yXXrcxRjrQs6z9R"}) { result { ...TAG_CARD } } ts: tags(selector: {tagBySlug: {slug: "interpretability"}}, limit: 1) { results { ...TAG_CARD } } tp: TagPreview(slug: "interpretability") { tag { ...TAG_CARD } lens { ...MDOC_REF } } s: sequences(selector: {default: {sequenceIds: ["5g5TkQTe9rmPS5vvM"]}}, limit: 1) { results { ...SEQ_CARD } } col: collections(selector: {default: {}}, limit: 10) { results { _id slug title books { _id title number postedAt sequenceIds sequences { ...SEQ_REF } } } } co: post(selector: {_id: "uMQ3cqWDPHhjtiesc"}, allowNull: true) { result { ...POST_CARD } } }')).toBe(true);
+      sequenceIds: ["5g5TkQTe9rmPS5vvM"], collections: true }));
+    expect(text.startsWith('query find_graphql { p: posts(selector: {default: {exactPostIds: ["uMQ3cqWDPHhjtiesc", "zHhGa3iQBQcdSifFL"]}}, limit: 2) { results { ...POST_CARD } } ps: posts(selector: {slugPost: {slug: "agi-ruin-a-list-of-lethalities"}}, limit: 2) { results { ...POST_CARD } } u: users(selector: {usersByUserIds: {userIds: ["nmk3nLpQE89dMRzzN"]}}, limit: 1) { results { ...USER_CARD } } ug1: GetUserBySlug(slug: "paul-christiano") { ...USER_CARD } ug2: GetUserBySlug(slug: "paulchristiano") { ...USER_CARD } ug3: GetUserBySlug(slug: "paul_christiano") { ...USER_CARD } t1: tag(selector: {_id: "56yXXrcxRjrQs6z9R"}) { result { ...TAG_CARD } } ts: tags(selector: {tagBySlug: {slug: "interpretability"}}, limit: 1) { results { ...TAG_CARD } } tp: TagPreview(slug: "interpretability") { tag { ...TAG_CARD } lens { ...MDOC_REF } } s: sequences(selector: {default: {sequenceIds: ["5g5TkQTe9rmPS5vvM"]}}, limit: 1) { results { ...SEQ_CARD } } col: collections(selector: {default: {}}, limit: 10) { results { _id slug title books { _id title number postedAt sequenceIds sequences { ...SEQ_REF } } } } }')).toBe(true);
     expect(findHydrateOps({ postIds: [], postSlugs: ["a-b", "c-d"], userIds: [], userSlugs: [], tagIds: [], tagSlugs: ["x", "y"], sequenceIds: [], collections: false }).map((o) => o.alias))
       .toEqual(["ps", "ps2", "ts", "tp", "ts2", "tp2"]);
   });
@@ -119,6 +119,14 @@ describe("find", () => {
     const b = await h.call("find", { items: [{ kind: "user", query: "Paul Christiano", commented_on: "draftPost00000001" }] });
     expect(b.text).toContain("  commented_on ignored: that post is not publicly visible");
     expect(h.forum.requests.some((r) => r.body.includes("postCommentsOld"))).toBe(false);
+  });
+
+  it("a commented_on post given as a bare 17-character string is asked as id and as slug, under ids/resolve's aliases with the prefix c", async () => {
+    const h = h0();
+    await h.call("find", { items: [{ kind: "user", query: "Paul Christiano", commented_on: "uMQ3cqWDPHhjtiesc" }] });
+    const hydrate = gqlTexts(h.forum).find((t) => t.includes("slugPost"));
+    expect(hydrate).toContain('cp: post(selector: {_id: "uMQ3cqWDPHhjtiesc"}, allowNull: true) { result { ...POST_CARD } }');
+    expect(hydrate).toContain('cs: posts(selector: {slugPost: {slug: "uMQ3cqWDPHhjtiesc"}}, limit: 2) { results { ...POST_CARD } }');
   });
 
   it("S15 user best match: exact name, karma ≥ 10 and ten times every other candidate", async () => {

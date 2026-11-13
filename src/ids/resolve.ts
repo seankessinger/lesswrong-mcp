@@ -160,11 +160,12 @@ function inputKey(ref: ParsedRef): string {
 }
 
 /**
- * The key under which a reference's `not_found` or `not_public` is remembered (¶2.3): a tool that composes its own first
- * request reads `svc.caches.get("negative", negativeKey(ref))` before sending it, so a remembered refusal costs no request.
+ * ¶2.3: a `not_found` or `not_public` remembered for this reference is thrown again, costing no request. `resolve` calls it
+ * first, and so does every tool that composes its own first request.
  */
-export function negativeKey(ref: ParsedRef): string {
-  return inputKey(ref);
+export function throwRemembered(ref: ParsedRef, svc: Services): void {
+  const negative = svc.caches.get<{ category: Category; message: string }>("negative", inputKey(ref));
+  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
 }
 
 // building a Resolved
@@ -484,8 +485,7 @@ export function forgetResolution(ref: ParsedRef, id: string, error: (value: stri
  */
 export async function resolve(ref: ParsedRef, param: string, ctx: CallContext, svc: Services, opts?: { select?: ResolveSelect }): Promise<Resolved> {
   if (ref.form === "collection") return collectionOf(ref);
-  const negative = svc.caches.get<{ category: Category; message: string }>("negative", inputKey(ref));
-  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
+  throwRemembered(ref, svc);
   const cached = cachedResolution(ref, ctx, svc);
   if (cached !== undefined) return cached;
   const results = await svc.gql(resolutionOps(ref, "", opts?.select), ctx, `resolving ${param}`);

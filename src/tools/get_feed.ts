@@ -23,7 +23,7 @@ import { FEED_LIMITS, feedOp, frontpageAfter } from "../forum/templates/get_feed
 import {
   collect, feedEnded, listPage, scanThenKeep, sliceAfter, slicePosition, stateAfter, type Collected, type OffsetSource,
 } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import {
   CAVEAT, emptyText, endMostReturned, filterKeptNote, FLAG, fmtInt, partialLine, SHORT_PAGE_NOTE, staleCacheCaveat,
 } from "../render/messages";
@@ -35,7 +35,8 @@ import type {
   RawTagCard, RawTagRef, RawUserRef, Services, StopReason, StreamState, ToolDef, ToolOutput,
 } from "../types";
 import {
-  checkContinuation, dateEchoes, givenArgs, isRecord, mint, nextText, openContinuation, periodText, positionText, reply, rowsOf, setting,
+  checkContinuation, dateEchoes, givenArgs, isRecord, mint, nextText, openContinuation, periodText, positionText, reply,
+  resumedFrom, rowsOf, setting,
 } from "./common";
 import { aliasData } from "./loaders";
 
@@ -54,7 +55,7 @@ const DESCRIPTION_QUOTE = [
   "- this_week — posts curated in the last 7 days, plus posts frontpaged in the last 7 days that were never curated (by curation or frontpage date, not posting date), in the forum's order; events, group posts and posts moderators excluded from recommendations are left out;",
   "- wiki_activity — new tags, wiki edits and wiki discussion comments, newest first (extra tabs and summaries not included);",
   "- dialogues — the 100 newest dialogues by posting or dialogue message, up to about 12 minutes old;",
-  "- best_of — Best of LessWrong (Annual Review) winners, from 2018 on, filtered with date_from/date_to on the posting date (a winner's review year can differ); sort new (default: newest review year first, then rank) or old;",
+  "- best_of — Best of LessWrong (Annual Review) winners, from 2018 on, filtered with date_from/date_to on the posting date (a winner's review year can differ); dates are UTC and date_to includes the whole day, month or year it names; sort new (default: newest review year first, then rank) or old;",
   "- spotlight — the home page's current featured item (it changes about daily).",
   "",
   "For frontpage and quick_takes, this server reads up to about the 2,000th result in this order, and rankings can shift between pages as votes arrive. When the forum returns the most items this server asks for (this_week 300, popular_comments and dialogues 100), the last page says more may exist. af_only keeps AF items in the same order (frontpage: the LessWrong pinned posts that are on AF stay first; pages can be short); recent_discussion keeps wiki items, which have no AF status; not available for wiki_activity. For the latest or curated posts use list_posts (sort=new, curated_only=true); for the latest comments use list_comments.",
@@ -868,8 +869,7 @@ async function continuation(entry: CursorEntry, p: GetFeedParams, ctx: CallConte
   return pageOf(
     {
       plan, state: entry.state, ...(from !== undefined && { from }),
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -891,7 +891,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetFeedParams> = {
   name: "get_feed",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   required: ["feed"],
   run(p, ctx, svc) {

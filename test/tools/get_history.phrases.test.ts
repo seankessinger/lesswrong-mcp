@@ -124,6 +124,17 @@ describe("get_history phrases", () => {
     expect(pages[0].text).toContain('"late phrase": first appears between v1.393.0 and v1.401.0; continue with the cursor');
   });
 
+  it("¶3.9 a probe round the forum fails to read is the call's error", async () => {
+    const h = createHarness({ families: FAMILIES, extra: longIntroHistory() });
+    const nothing = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`r${i + 1}`, null]));
+    h.forum.inject({
+      endpoint: "graphql", when: (b) => b.includes("r3: revision"), times: 1,
+      body: JSON.stringify({ data: nothing, errors: [{ message: "Something went wrong", path: ["r2"] }] }),
+    });
+    const out = await h.call("get_history", { post: "LongIntroPost0001", phrases: ["rare phrase"] });
+    expect(out.text).toBe("Error (forum_error): The forum returned an error while reading the version texts (Something went wrong). Try again later.");
+  });
+
   it("¶2.2 step 5 a time-limit stop before the second round keeps what the first round narrowed; the cursor finishes the search", async () => {
     const h = createHarness({ families: FAMILIES, extra: longIntroHistory() });
     h.forum.inject({ endpoint: "graphql", when: (b) => b.includes("r3: revision"), delayMs: 41_000, times: 1 }); // round 1 answers after 41 s

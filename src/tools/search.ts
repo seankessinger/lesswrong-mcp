@@ -19,10 +19,9 @@ import { commentPublic, postPublic, sequenceListable, tagSurfaced, userPublic } 
 import { badInput, CallStopped, internalError } from "../errors";
 import { buildSearch, buildText, estimateBytes } from "../forum/search";
 import { searchAlias, searchHydrateOps } from "../forum/templates/search";
-import { isEntityId } from "../ids/parse";
 import { echoOf } from "../ids/resolve";
 import { searchPageAllowed } from "../paging/pager";
-import { CONVENTIONS_LINE, P, searchSorts } from "../params/vocabulary";
+import { FORUM_TEXT, P, searchSorts } from "../params/vocabulary";
 import { CAVEAT, emptyText, END_SEARCH_DEPTH, FLAG, fmtInt, SHORT_PAGE_NOTE } from "../render/messages";
 import { commentBlock, personText, postLine, sequenceLine, snippetText, tagCard, userCard } from "../render/records";
 import { effectiveDate, parseRange } from "../text/dates";
@@ -34,8 +33,8 @@ import type {
   SortValue, StreamState, ToolDef, ToolOutput,
 } from "../types";
 import {
-  checkContinuation, dateEchoes, FILTER_PARAMS, type FilterParam, type Filters, givenArgs, isRecord, mint, nextText, openContinuation, periodText, positionText, reply,
-  resolveFilters, setting, tagFilterText, tagIdOf,
+  checkContinuation, dateEchoes, FILTER_PARAMS, givenArgs, isRecord, mint, nextText, openContinuation, periodText, positionText,
+  reply, resolveFilters, resumedFrom, searchHitId, setting, tagFilterText, tagIdOf, type FilterParam, type Filters,
 } from "./common";
 import { aliasData } from "./loaders";
 
@@ -51,7 +50,7 @@ interface Pos { page: number; index: number }
 const TITLE = "Where is X discussed?";
 /** ¶4.2, verbatim. */
 const DESCRIPTION_QUOTE =
-  "Full-text search of LessWrong and the Alignment Forum (one index for both; AF items are flagged). kind: post (default; titles and text), comment, user (display name, bio, job, organization and the \"how I can help\" texts), tag (wiki pages: name and text, including extra tabs) or sequence. limit counts hits. query words match loosely: with several words most but not all must match (two need only one), word endings match, typos barely, OR and AND are ignored. Kind user: the forum also matches parts of names, so without phrases a person is kept only if a listed field holds a query word whole. Posts and comments rank by relevance weighted by karma, with no recency factor; the other kinds by the forum's own mix. A person's name in query also matches what they wrote; use user to filter by author. For exact wording use phrases: every phrase must occur in the same item, as exact words with no word endings, a possessive among them; for any of several forms (\"mesa optimizer\", \"mesa optimizers\", \"mesa optimizer's\"), search each separately or use query. Hyphens count as spaces; a phrase reads across commas, not sentence or paragraph ends. Kind sequence sends phrases as plain words (no exact matching there), checked here. Every hit is checked here for the phrases in its own text (a post's title and text), and hits that matched the search but not the phrase there (on an author name, formatting or different punctuation) are dropped and counted. The forum's exact matching can't reach a word it keeps whole with punctuation inside (\"Goodhart's\", \"Node.js\", \"GPT-4.5\", \"1,000\", \"cousin_it\") or a word with accented letters (\"Gödel\"), so a phrase holding one is searched loosely and then checked here exactly (hits with only the other apostrophe form are labelled). Not every hit of such a search contains the phrase, so read on with the cursor; it may miss some uses. Other punctuation inside a word (\"R&D\", \"and/or\", \"P(doom)\") splits it, and the parts are matched exactly. With exclude and no phrases, any one of the query words is enough; with phrases, query words only affect ranking, unless every phrase is searched loosely, when they count as words to match; beside a quoted phrase or an exclude, punctuation and accented letters in query words are dropped. exclude: single words to leave out (the forum can't exclude a phrase; kind user applies it here, as if none was sent). Filters: user (the primary author only, so coauthored posts are missed; kinds post and comment; for sequences by a person use list_sequences), tag (kind post: tagged posts; kind comment: comments whose post had that tag when the comment was indexed; retagging a post doesn't update them), post (kind comment: comments on one post), af_only (posts, comments and sequences on AF; for kind user, AF members; not for kind tag), date_from/date_to (kinds post and comment). sort: relevance (default); for post and comment also new, old and top (karma as of the search index's last update); for user new and old (account creation) and top (karma); for sequence new and old; tag hits by relevance only (imported pages carry Arbital-era dates). Abbreviations and synonyms are not expanded: search \"LLM\" and \"language model\" separately. Search matches each item's current text only, dated by its original posting date, and leaves out posts with negative karma, unlisted posts, retracted comments and comments by authors the site never approved. first_use checks edit history. Comment results can include the turns of old-style debates, flagged \"debate turn\"; post results include event posts, flagged. Each hit shows its ids, context, author, date, live karma, AF status and snippet; the match count is the forum's loose count, not how many items discuss the topic. Results stop 10,000 deep. query or phrases is required, except that a filter (user, tag, post) with sort new, old or top lists everything matching the filters.";
+  "Full-text search of LessWrong and the Alignment Forum (one index for both; AF items are flagged). kind: post (default; titles and text), comment, user (display name, bio, job, organization, the \"how I can help\" texts), tag (wiki pages: name and text, including extra tabs) or sequence. limit counts hits. query words match loosely: with several words most but not all must match (two need only one), word endings match, typos barely, OR and AND are ignored. Kind user: the forum also matches parts of names, so without phrases a person is kept only if a listed field holds a query word whole. Posts and comments rank by relevance weighted by karma, not by recency; other kinds by the forum's own mix. A person's name in query also matches what they wrote; use user to filter by author. For exact wording use phrases: every phrase must occur in the same item, as exact words with no word endings, a possessive among them; for several forms (\"mesa optimizer\", \"mesa optimizers\"), search each separately or use query. Hyphens count as spaces; a phrase reads across commas, not sentence or paragraph ends. Kind sequence searches phrases as plain words, checked here. Every hit is checked here for the phrases in its own text (a post's title and text); hits that matched only elsewhere (an author name, formatting, other punctuation) are dropped and counted. The forum's exact matching can't reach a word it keeps whole with punctuation inside (\"Goodhart's\", \"Node.js\", \"GPT-4.5\", \"1,000\", \"cousin_it\") or a word with accented letters (\"Gödel\"), so a phrase holding one is searched loosely and then checked here exactly (hits with only the other apostrophe form are labelled). Not every hit of such a search contains the phrase, so read on with the cursor; it may miss some uses. Other punctuation inside a word (\"R&D\", \"and/or\", \"P(doom)\") splits it, and the parts are matched exactly. With exclude and no phrases, any one of the query words is enough; with phrases, query words only affect ranking, unless every phrase is searched loosely, when they count as words to match; beside a quoted phrase or an exclude, punctuation and accented letters in query words are dropped. exclude: single words to leave out (the forum can't exclude a phrase; kind user applies it here, as if none was sent). Filters: user (the primary author only, so coauthored posts are missed; kinds post and comment; for sequences by a person use list_sequences), tag (kind post: tagged posts; kind comment: comments whose post had that tag when the comment was indexed; retagging a post doesn't update them), post (kind comment: comments on one post), af_only (posts, comments and sequences on AF; for kind user, AF members; not for kind tag), date_from/date_to (kinds post and comment; UTC; date_to includes the whole day, month or year it names). sort: relevance (default); for post and comment also new, old and top (karma as of the search index's last update); for user new and old (account creation) and top (karma); for sequence new and old; tag hits by relevance only. Abbreviations and synonyms are not expanded: search \"LLM\" and \"language model\" separately. Search matches each item's current text only, dated by its original posting date, and leaves out posts with negative karma, unlisted posts, retracted comments and comments by authors the site never approved. first_use checks edit history. Comment results can include the turns of old-style debates, flagged \"debate turn\"; post results include event posts, flagged. Each hit shows its ids, context, author, date, live karma, AF status and snippet; the match count is the forum's loose count, not how many items discuss the topic. Results stop 10,000 deep. query or phrases is required, except that a filter (user, tag, post) with sort new, old or top lists everything matching the filters.";
 
 const SEARCH_TASK = "searching the forum";
 const HYDRATE_TASK = "reading the search hits";
@@ -277,11 +276,6 @@ function localSnippet(text: string, plan: Plan): string {
   return oneLine(text.slice(start), SNIPPET_CAP);
 }
 
-const hitId = (hit: SearchHit): string | undefined => {
-  const id = typeof hit._id === "string" ? hit._id : hit.objectID;
-  return isEntityId(id) ? id : undefined;
-};
-
 function checkHit(plan: Plan, hit: SearchHit, id: string, pos: Pos, excludeLocally: boolean): Checked {
   const kind = plan.ask.kind;
   if (kind === "user") return { id, pos, verdict: "ok", labels: [], localSnippet: "", ownTerms: true };
@@ -479,7 +473,7 @@ async function collect(plan: Plan, f: Filters, start: Pos, ctx: CallContext, svc
         break;
       }
       r.hits.forEach((hit, index) => {
-        const id = hitId(hit);
+        const id = searchHitId(hit);
         if (id === undefined || (page === from.page && index < from.index)) return;
         hits.push(checkHit(plan, hit, id, { page, index }, excludeLocally));
       });
@@ -707,8 +701,7 @@ async function continuation(entry: CursorEntry, p: SearchParams, ctx: CallContex
   return searchPage(
     {
       plan, filters, state, ...(from !== undefined && { from }),
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -736,7 +729,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<SearchParams> = {
   name: "search",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   run(p, ctx, svc) {
     const entry = openContinuation("search", p.cursor, svc);

@@ -23,29 +23,29 @@ import { toSequenceRecord } from "../domain/sequences";
 import { userUrl } from "../domain/urls";
 import { toUserProfile } from "../domain/users";
 import { commentPublic, postPublic, sequenceListable, userPublic } from "../domain/visibility";
-import { CallStopped, forumError, internalError, isToolError, loginOnly, notFound, notPublic, ToolError } from "../errors";
+import { CallStopped, internalError, isToolError, notFound, notPublic, ToolError } from "../errors";
 import { AF_COMMENT_SCAN, getUserFollowupOps, getUserMainOps, POSTS_SPARE, PROFILE_SEQUENCES_LIMIT } from "../forum/templates/get_user";
 import { isEntityId, parseRef } from "../ids/parse";
 import { echoOf, resolve } from "../ids/resolve";
 import { fingerprint, sliceAfter } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { Budget, estimateTokens, sliceText } from "../render/budget";
 import { fence, renderPage } from "../render/layout";
 import { CAVEAT, CUT_IN_CODE, cutMarker, emptyText, FLAG, fmtInt, partialLine } from "../render/messages";
-import { commentBlock, postLine, quote, revisionLine, sequenceLine } from "../render/records";
+import { commentBlock, counted, postLine, quote, revisionLine, sequenceLine } from "../render/records";
 import { day } from "../text/dates";
 import { oneLine } from "../text/sanitize";
 import type {
   AliasResult, AliasResults, CallContext, Consumed, CursorEntry, CursorState, Footer, GqlOp, PageItem, ParsedRef, RawCommentLight,
-  RawCommentList, RawPostCard, RawSeqCard, RawUserProfile, Resolved, RevisionRecord, Services, StopReason, StreamState, ToolDef,
+  RawCommentList, RawPostCard, RawSeqCard, RawUserProfile, Resolved, RevisionRecord, Services, StreamState, ToolDef,
   ToolOutput, UserProfile,
 } from "../types";
-import { checkContinuation, givenArgs, handOffCall, isRecord, mint, openContinuation, rowsOf, setting } from "./common";
+import { checkContinuation, givenArgs, handOffCall, isRecord, mint, openContinuation, resumedFrom, rowsOf, setting } from "./common";
 import { historyUserEffective, tool as getHistoryTool, type GetHistoryParams } from "./get_history";
 import { listCommentsEffective, tool as listCommentsTool, type ListCommentsParams } from "./list_comments";
 import { listPostsEffective, tool as listPostsTool, type ListPostsParams } from "./list_posts";
-import { listSequencesEffective, tool as listSequencesTool, type ListSequencesParams } from "./list_sequences";
-import { loadUserWikiEdits } from "./loaders";
+import { createdMs, listSequencesEffective, tool as listSequencesTool, type ListSequencesParams } from "./list_sequences";
+import { aliasPart, failureOf, loadUserWikiEdits, partOf, send, type Part as AnswerPart, type Sent } from "./loaders";
 
 type GetUserParams = { user?: string; af_only: boolean; limit: number; cursor?: string; max_tokens: number };
 
@@ -97,15 +97,6 @@ const PARTIAL_NAME: Readonly<Record<SectionKey, string>> = {
   pinned: "pinned posts", top: "top posts", latest: "latest posts", comments: "latest comments", sequences: "sequences", wiki: "wiki edits",
 };
 
-/** A creation date in epoch milliseconds, 0 for an unreadable one: `list_sequences`' own accessor, so fingerprints agree. */
-function createdMs(r: { createdAt: string }): number {
-  const t = Date.parse(r.createdAt);
-  return Number.isFinite(t) ? t : 0;
-}
-
-/** A whole count with its noun: `1 post`, `967 posts`. */
-const counted = (n: number, one: string): string => `${fmtInt(n)} ${n === 1 ? one : `${one}s`}`;
-
 // what was asked
 
 /** The parameters that shape a page, stored in its cursor. */
@@ -145,47 +136,28 @@ interface PageInput {
 
 // the answers
 
-/** One part of a request: its rows (and the raw count the forum gave), or the `Partial:` line of its failure. */
+/** One part of a request as a section reads it: its rows (and the raw count the forum gave), or the `Partial:` line of its failure. */
 type Part<T> = { ok: true; rows: T[]; totalCount?: number } | { ok: false; partial: string };
 
-/** The part `alias` of an answer, for `key`'s section: no rows for the forum's "nothing here", a `Partial:` line for any other error. */
-function partOf<T>(r: AliasResult | undefined, key: SectionKey): Part<T> {
-  if (r === undefined) return { ok: true, rows: [] };
-  if ("error" in r) {
-    if (r.error === "not_found" || r.error === "not_public") return { ok: true, rows: [] };
-    return { ok: false, partial: partialLine(PARTIAL_NAME[key], new ToolError(r.error, r.message)) };
-  }
-  const totalCount = isRecord(r.data) && typeof r.data.totalCount === "number" ? r.data.totalCount : undefined;
-  return { ok: true, rows: rowsOf<T>(r.data), ...(totalCount !== undefined && { totalCount }) };
+/** `part`'s rows; a part not read (an alias not asked for or not in the answer) has none. */
+function rowsPart<T>(part: AnswerPart): Part<T> {
+  if (!part.ok) return part.partial === undefined ? { ok: true, rows: [] } : { ok: false, partial: part.partial };
+  const totalCount = isRecord(part.data) && typeof part.data.totalCount === "number" ? part.data.totalCount : undefined;
+  return { ok: true, rows: rowsOf<T>(part.data), ...(totalCount !== undefined && { totalCount }) };
 }
 
-/** What the follow-up request gave: not needed, stopped (deadline or cap), failed as a whole, or its answer. */
-type Sent = { kind: "none" } | { kind: "stopped"; why: StopReason } | { kind: "failed"; error: ToolError } | { kind: "ok"; results: AliasResults };
-
-async function sendFollowup(ops: readonly GqlOp[], ctx: CallContext, svc: Services): Promise<Sent> {
-  if (ops.length === 0) return { kind: "none" };
-  try {
-    return { kind: "ok", results: await svc.gql(ops, ctx, FOLLOWUP_TASK) };
-  } catch (e) {
-    if (e instanceof CallStopped) return { kind: "stopped", why: e.reason };
-    if (isToolError(e)) return { kind: "failed", error: e };
-    throw e;
-  }
+/** The part `alias` of the main request, for `key`'s section: no rows for the forum's "nothing here", a `Partial:` line for any other error. */
+function mainPart<T>(main: AliasResults, alias: string, key: SectionKey): Part<T> {
+  return rowsPart<T>(aliasPart(main, alias, PARTIAL_NAME[key]));
 }
 
 /**
- * The part `alias` of the follow-up for `key`'s section: no rows when it was not asked for, `undefined` when the request was
- * stopped (the section is left out, not shown empty), the request's own failure as the section's `Partial:` line (¶7), else the
- * alias's answer.
+ * The part `alias` of the follow-up for `key`'s section: `undefined` when the request that asked for it was stopped (the section is
+ * left out, not shown empty), the request's own failure as the section's `Partial:` line (¶7), else as `mainPart` reads it.
  */
 function followupPart<T>(sent: Sent, ops: readonly GqlOp[], alias: string, key: SectionKey): Part<T> | undefined {
-  if (!ops.some((o) => o.alias === alias)) return { ok: true, rows: [] };
-  switch (sent.kind) {
-    case "none": return { ok: true, rows: [] };
-    case "stopped": return undefined;
-    case "failed": return { ok: false, partial: partialLine(PARTIAL_NAME[key], sent.error) };
-    case "ok": return partOf<T>(sent.results.get(alias), key);
-  }
+  if (sent.kind === "stopped" && ops.some((o) => o.alias === alias)) return undefined;
+  return rowsPart<T>(partOf(sent, ops, alias, PARTIAL_NAME[key]));
 }
 
 /**
@@ -208,10 +180,7 @@ function profileOf(results: AliasResults, x: PageInput, ctx: CallContext, svc: S
     switch (r.error) {
       case "not_found": throw forget(x, notFound("user", "id", id), ctx, svc);
       case "not_public": throw forget(x, notPublic(`the user with the id "${id}"`, "user"), ctx, svc);
-      case "internal": throw internalError(ctx.tool, r.message);
-      case "forum_error": throw forumError(MAIN_TASK, r.message);
-      case "login_only": throw loginOnly();
-      default: throw new ToolError(r.error, r.message);
+      default: throw failureOf(r, MAIN_TASK, ctx);
     }
   }
   const doc = isRecord(r.data) ? r.data.result : undefined;
@@ -528,21 +497,21 @@ async function userPage(x: PageInput, maxTokens: number, ctx: CallContext, svc: 
   const profile = toUserProfile(profileOf(main, x, ctx, svc));
 
   // Request 3, only with a part that applies.
-  const scan = ask.afOnly ? partOf<RawCommentLight>(main.get("cl"), "comments") : undefined;
+  const scan = ask.afOnly ? mainPart<RawCommentLight>(main, "cl", "comments") : undefined;
   const afIds = scan === undefined ? [] : afCommentIds(scan, s);
   const secondPage = mainWe && secondWikiPageNeeded(main.get("we"));
   const pinnedIds = profile.pinnedPostIds.filter(isEntityId);
   const followOps = getUserFollowupOps({ userId, pinnedIds, secondWikiPage: secondPage, afCommentIds: afIds });
-  const sent = await sendFollowup(followOps, ctx, svc);
+  const sent = await send(followOps, FOLLOWUP_TASK, ctx, svc);
 
   // The sections from the block this page starts at; each is built (and its hand-off minted) only when it can be shown.
-  const seq = partOf<RawSeqCard>(main.get("seq"), "sequences");
+  const seq = mainPart<RawSeqCard>(main, "seq", "sequences");
   const builders: readonly (() => Promise<Built | undefined>)[] = [
     async () => pinnedSection(followupPart<RawPostCard>(sent, followOps, "pin", "pinned"), pinnedIds, s),
-    async () => postsSection("top", partOf<RawPostCard>(main.get("top"), "top"), s),
-    async () => postsSection("latest", partOf<RawPostCard>(main.get("recent"), "latest"), s),
+    async () => postsSection("top", mainPart<RawPostCard>(main, "top", "top"), s),
+    async () => postsSection("latest", mainPart<RawPostCard>(main, "recent", "latest"), s),
     async () => scan === undefined
-      ? commentsSection(partOf<RawCommentList>(main.get("cm"), "comments"), s)
+      ? commentsSection(mainPart<RawCommentList>(main, "cm", "comments"), s)
       : afCommentsSection(scan, followupPart<RawCommentList>(sent, followOps, "ch", "comments"), afIds, s, profile.slug),
     async () => sequencesSection(seq, s),
     () => wikiSection(main, sent, secondPage, s),
@@ -644,8 +613,7 @@ async function continuation(entry: CursorEntry, p: GetUserParams, ctx: CallConte
       resolved, ref, ask: { afOnly: stored.af_only, limit: stored.limit }, callerUser: firstUser, limitGiven: Object.hasOwn(entry.args, "limit"),
       ...(!page1 && { start: state }), ...(typeof data.mainWe === "boolean" && { mainWe: data.mainWe }),
       ...(!page1 && { restFrom }),
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -664,7 +632,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetUserParams> = {
   name: "get_user",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   required: ["user"],
   run(p, ctx, svc) {

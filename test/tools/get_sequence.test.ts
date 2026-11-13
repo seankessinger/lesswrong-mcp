@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { collectionOp, getSequenceRequest1Ops, getSequenceRequest2Ops } from "../../src/forum/templates/get_sequence";
+import { collectionOp, getSequenceRequest1Ops, getSequenceRequest2Ops, MARKED_POST_FIELDS } from "../../src/forum/templates/get_sequence";
+import { resolutionOps } from "../../src/ids/resolve";
 import type { ParsedRef, PublicSequenceId, RawPostCard } from "../../src/types";
 import { loadFamilies, type FixtureEntry } from "../support/fixtures";
 import { estimateTokens } from "../../src/render/budget";
@@ -18,23 +19,25 @@ describe("get_sequence templates", () => {
     expect(collectionOp("oneQyj4pw77ynzwAF").text).toBe('c: collection(selector: {_id: "oneQyj4pw77ynzwAF"}) { result { _id title slug contents { markdown } books { _id title number postedAt sequenceIds sequences { ...SEQ_CARD } } } }');
   });
 
+  // The tool asks for the post given as `post` by ids/resolve's ops with the prefix `p`, as here.
+  const req1 = (post?: ParsedRef) => getSequenceRequest1Ops(PW, post === undefined ? [] : resolutionOps(post, "p", { post: MARKED_POST_FIELDS }));
+
   it("request 1: the sequence, plus the given post with its canonical sequence", () => {
-    expect(getSequenceRequest1Ops(PW).map((o) => o.text)).toEqual([
+    expect(req1().map((o) => o.text)).toEqual([
       's: sequence(selector: {_id: "5g5TkQTe9rmPS5vvM"}, allowNull: true) { result { ...SEQ_CARD contents { markdown } } }',
     ]);
-    expect(getSequenceRequest1Ops(PW, postRef("id", "uMQ3cqWDPHhjtiesc"))[1].text)
-      .toBe('p: post(selector: {_id: "uMQ3cqWDPHhjtiesc"}, allowNull: true) { result { ...POST_REF canonicalSequence { ...SEQ_REF } } }');
-    expect(getSequenceRequest1Ops(PW, { kind: "post", form: "slug", value: "the-martial-art-of-rationality", given: "slug", notes: [] })[1].text)
+    expect(req1(postRef("id", "uMQ3cqWDPHhjtiesc"))[1].text)
+      .toBe('pp: post(selector: {_id: "uMQ3cqWDPHhjtiesc"}, allowNull: true) { result { ...POST_REF canonicalSequence { ...SEQ_REF } } }');
+    expect(req1({ kind: "post", form: "slug", value: "the-martial-art-of-rationality", given: "slug", notes: [] })[1].text)
       .toBe('ps: posts(selector: {slugPost: {slug: "the-martial-art-of-rationality"}}, limit: 2) { results { ...POST_REF canonicalSequence { ...SEQ_REF } } }');
   });
 
   it("request 1: a bare 17-character post sends both halves, an LW1 id its own alias, and every op names its template", () => {
-    const both = getSequenceRequest1Ops(PW, postRef("idOrSlug", "uMQ3cqWDPHhjtiesc"));
-    expect(both.map((o) => o.alias)).toEqual(["s", "p", "ps"]);
-    const legacy = getSequenceRequest1Ops(PW, postRef("legacy", "2bz"));
+    const both = req1(postRef("idOrSlug", "uMQ3cqWDPHhjtiesc"));
+    expect(both.map((o) => o.alias)).toEqual(["s", "pp", "ps"]);
+    const legacy = req1(postRef("legacy", "2bz"));
     expect(legacy.map((o) => o.text)[1]).toBe('pl: posts(selector: {legacyIdPost: {legacyId: "2bz"}}, limit: 1) { results { ...POST_REF canonicalSequence { ...SEQ_REF } } }');
     expect([...both, ...legacy].every((o) => o.template === "get_sequence_req1")).toBe(true);
-    expect(() => getSequenceRequest1Ops(PW, postRef("word", "original"))).toThrow("Unexpected failure in get_sequence_req1 (a post given as word). Please report this.");
     expect(collectionOp("oneQyj4pw77ynzwAF").template).toBe("get_sequence_collection");
     expect(getSequenceRequest2Ops({ sequenceId: PW as PublicSequenceId, listing: true }).every((o) => o.template === "get_sequence_req2")).toBe(true);
   });
@@ -132,6 +135,18 @@ describe("get_sequence: a marked post", () => {
     const out = await h.call("get_sequence", { sequence: PW, post: "pwLastPost0000001" });
     expect(h.forum.requests).toHaveLength(2);
     expect(out.isError).toBe(false);
+    expect(out.text).toContain('next: in the next sequence of rationality: "Fake Beliefs" (sequence_id fakeBeliefsSeq001)');
+    expect(out.text).toMatch(/Stopped early \(time limit\); call get_sequence with cursor "c_[A-Za-z0-9_-]{22}" to continue\.$/);
+  });
+
+  it("¶2.2 step 5 past 40 s request 3 is not sent at all: not even an answer an earlier call left in the cache is used", async () => {
+    const h = createHarness({ families: FAMILIES });
+    await h.call("get_sequence", { sequence: PW, post: "pwLastPost0000001" });
+    expect(h.forum.requests).toHaveLength(3);
+    // Request 2 is sent again (the collections listing, now cached, no longer rides along) and answers after 41 s.
+    h.forum.inject({ endpoint: "graphql", when: (b) => b.includes("getSequenceStats"), delayMs: 41_000 });
+    const out = await h.call("get_sequence", { sequence: PW, post: "pwLastPost0000001" });
+    expect(h.forum.requests).toHaveLength(4);
     expect(out.text).toContain('next: in the next sequence of rationality: "Fake Beliefs" (sequence_id fakeBeliefsSeq001)');
     expect(out.text).toMatch(/Stopped early \(time limit\); call get_sequence with cursor "c_[A-Za-z0-9_-]{22}" to continue\.$/);
   });
@@ -283,11 +298,22 @@ describe("get_sequence: marked posts that are refused or filtered", () => {
   it("an LW1 id or URL as post is read by its own alias", async () => {
     const h = createHarness({ families: FAMILIES });
     const out = await h.call("get_sequence", { sequence: BS, post: "https://www.lesswrong.com/lw/g/some-title" });
-    expect(gqlTexts(h.forum)[0]).toContain('legacyIdPost: {legacyId: "g"}');
+    expect(gqlTexts(h.forum)[0]).toContain('pl: posts(selector: {legacyIdPost: {legacyId: "g"}}');
     expect(out.text).toContain('post → "Some Title" (post_id lw1Post0000000016)');
     expect(out.text).toContain("This post is not in this sequence.");
     expect(out.text).not.toContain("The site's canonical sequence for this post");
     expect(h.forum.requests).toHaveLength(2);
+    expectClean(h);
+  });
+
+  it("request 1 asks for a bare 17-character post as id and as slug, under ids/resolve's aliases with the prefix p", async () => {
+    const h = createHarness({ families: FAMILIES });
+    const out = await h.call("get_sequence", { sequence: BS, post: "BsPost00000000009" });
+    const [req1] = gqlTexts(h.forum);
+    expect(req1).toMatch(/^query get_sequence_req1 \{ s: sequence\(selector: \{_id: "BiasesSequence001"\}/);
+    expect(req1).toContain('pp: post(selector: {_id: "BsPost00000000009"}, allowNull: true) { result { ...POST_REF canonicalSequence { ...SEQ_REF } } }');
+    expect(req1).toContain('ps: posts(selector: {slugPost: {slug: "BsPost00000000009"}}, limit: 2) { results { ...POST_REF canonicalSequence { ...SEQ_REF } } }');
+    expect(out.text).toContain("(post_id BsPost00000000009");
     expectClean(h);
   });
 
@@ -511,6 +537,23 @@ describe("get_sequence: Partial lines", () => {
     expect(out.text).toContain("Partial: neighbouring sequence unavailable (forum_error: Something went wrong).");
     expect(out.text).toContain('Position: post 2 of 2 · previous: "Preface" (post_id pwFirstPost000001, LW only)\n');
     expect(h.forum.requests).toHaveLength(2);
+  });
+
+  it("¶3.9 request 3 failing on both sides is one Partial line, each adjacent sequence named without its post", async () => {
+    const h = createHarness({
+      families: FAMILIES,
+      extra: [
+        ...inRationality(MID, "The Middle", [card("MidPostOnly000001", "Mid Only")]),
+        rationalityBook([[PW, "Predictably Wrong"], [MID, "The Middle"], ["fakeBeliefsSeq001", "Fake Beliefs"]]),
+        failing({ root: "chapters", view: "SequenceChapters", terms: { sequenceId: PW } }),
+        failing({ root: "chapters", view: "SequenceChapters", terms: { sequenceId: "fakeBeliefsSeq001" } }),
+      ],
+    });
+    const out = await h.call("get_sequence", { sequence: MID, post: "MidPostOnly000001" });
+    expect(h.forum.requests).toHaveLength(3);
+    expect(out.text.match(/^Partial: .*$/gm)).toEqual(["Partial: neighbouring sequence unavailable (forum_error: Something went wrong)."]);
+    expect(out.text).toContain('previous: in the previous sequence of rationality: "Predictably Wrong" (sequence_id 5g5TkQTe9rmPS5vvM)');
+    expect(out.text).toContain('next: in the next sequence of rationality: "Fake Beliefs" (sequence_id fakeBeliefsSeq001)');
   });
 
   it("¶3.9 request 3 failing names the adjacent sequence without its post, with a Partial line", async () => {

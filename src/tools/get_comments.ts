@@ -27,24 +27,26 @@ import {
 import { postUrl, tagUrl } from "../domain/urls";
 import { attributable, pageOf, postPublic, tagPublic } from "../domain/visibility";
 import { badInput, CallStopped, internalError, notFound, ToolError } from "../errors";
-import { subjectOps } from "../forum/templates/get_comments";
+import { SUBJECT_SELECT } from "../forum/templates/get_comments";
 import { parseRef } from "../ids/parse";
-import { cachedResolution, dropResolution, echoOf, forgetResolution, negativeKey, readResolution } from "../ids/resolve";
+import { cachedResolution, dropResolution, echoOf, forgetResolution, readResolution, resolutionOps, throwRemembered } from "../ids/resolve";
 import { fingerprint, listPage } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { Budget, lineUnits, UNITS_PER_TOKEN } from "../render/budget";
 import { renderPage } from "../render/layout";
 import { CAVEAT, driftNote, emptyText, FLAG, fmtInt, matchLine } from "../render/messages";
-import { agreementText, commentBlock, commentHeader, outlineLine, parentText, personText, quote, threadHeader } from "../render/records";
+import { agreementText, commentBlock, commentHeader, counted, outlineLine, parentText, personText, quote, threadHeader } from "../render/records";
 import { day } from "../text/dates";
 import { foldForMatch, matchesText } from "../text/phrases";
 import { oneLine } from "../text/sanitize";
 import type {
-  CallContext, Category, CappedBlock, CommentRecord, Consumed, CursorEntry, CursorState, Fingerprint, Footer, Forest, PageItem,
+  CallContext, CappedBlock, CommentRecord, Consumed, CursorEntry, CursorState, Fingerprint, Footer, Forest, GqlOp, PageItem,
   PageSpec, ParentRef, ParsedRef, Person, PublicPostId, RankedThread, RawCommentList, RawMdocRef, RawPostRef, RawTagRef, Resolved,
   Services, SortValue, StreamState, Thread, ToolDef, ToolOutput, TrailingBlock, TreeNode,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, setting } from "./common";
+import {
+  checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, resumedFrom, setting,
+} from "./common";
 import { loadBodies, loadForest, type DiscussionSubject, type ForestCompanion } from "./loaders";
 
 type GetCommentsParams = {
@@ -62,6 +64,14 @@ const DESCRIPTION_QUOTE =
   "Read a discussion as threads, ready for summarizing: exactly one of post (the whole discussion of a post), comment (the thread containing this comment, which is marked ◆) or tag (a wiki page's discussion). Returns whole threads, rebuilt from every publicly listed comment, ranked by sort: top (the thread's first comment by karma; default; computed here because the forum's own \"top\" order is distorted), af_top (AF threads by their first comment's AF karma, then the rest), new / old (its date), largest (most comments), contested (most disagreement signals: disagree-type reactions, negative or split agreement votes, split karma votes, and two people replying back and forth; ties by size, then karma), active (most recent reply). Older discussions often have no reactions or agreement votes; the header then says so, and if nothing at all signals disagreement it says that threads were ranked by size and karma, which does not show that nobody disagreed. limit counts threads (with match: matching comments). On question posts the answer threads (A1, A1.1, …) come first; replies inside a thread are in time order and labelled T3, T3.1, T3.1.2. Labels change with sort and filters: refer to comments by comment_id. Each comment shows author, date, karma and vote count, agreement, reader reactions, flags (answer, retracted, edited, comment placeholder, review, quick take, moderator comment), its ids, and its AF karma if it is on AF; in an AF post's discussion, comments not on AF are marked \"not on AF\", and in other discussions comments without an AF mark are not on AF. The first page also lists the strongest disagreement signals, the comments readers marked as cruxes or as having changed their mind (up to 10 of each; every comment's own signals are also shown on it in the threads), and one line for each thread that did not fit, each with its comment_id. user=<person> keeps the threads that person wrote in, marks their comments ★, and lists for each of their comments who replied directly (with ids) and whether the person replied back further down (with ids). match=<text> keeps only the comments containing that text as whole words, each with its thread and parent. af_only keeps the threads that contain at least one AF comment; their non-AF comments stay, labelled \"not on AF\". With comment: user limits the reply map to that thread, match searches only that thread, sort only changes the reported rank, and af_only is refused. Position and ranks count the threads left after user and af_only. Threads mark a reply whose parent is not shown \"parent comment not shown\" (\"reply to a debate turn by …\" for the debate's turns). Comments the site shows as placeholders keep their place without author or text. The header gives the number of comments listed and the site's own counter, which can differ. The debate turns of old-style debate posts are in get_post.";
 
 const SUBJECT_TASK = "checking the discussion";
+
+/**
+ * ¶4.4 step 1: the ops of the subject request, in the order post, tag, comment, user, each only when its ref is given, with the
+ * bare aliases `readResolution` reads (post `p` `s` `l`, tag `t` `m` `a` `b`, comment `c`, person `i` `u`: no two kinds share one).
+ */
+export function subjectOps(target: { post?: ParsedRef; tag?: ParsedRef; comment?: ParsedRef; user?: ParsedRef }): GqlOp[] {
+  return [target.post, target.tag, target.comment, target.user].flatMap((r) => (r === undefined ? [] : resolutionOps(r, "", SUBJECT_SELECT)));
+}
 const TARGET_PARAMS = ["post", "comment", "tag"] as const satisfies readonly (keyof GetCommentsParams)[];
 
 const SEP = " · ";
@@ -118,8 +128,6 @@ const DRY_NONCE = "000000";
 const MAP_STREAM = 0;
 const ITEM_STREAM = 1;
 
-/** A whole count with its noun: `1 thread`, `3 threads`, `4 people`. */
-const counted = (n: number, one: string, many = `${one}s`): string => `${fmtInt(n)} ${n === 1 ? one : many}`;
 const idRef = (kind: "post" | "tag" | "user" | "comment", value: string): ParsedRef => ({ kind, form: "id", value, given: "id", notes: [] });
 const userPerson = (u: Resolved): Person => ({ kind: "user", id: u.id, slug: u.slug ?? null, name: u.name });
 
@@ -179,29 +187,6 @@ function requestEcho(t: Target, ask: Ask, echo: CallContext): string[] {
   return out;
 }
 
-/** The resume data a cursor holds (each field only when well formed; anything else is no data). */
-function resumeOf(data: unknown): Resume {
-  const d = isRecord(data) ? data : {};
-  const count = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
-  const out: Resume = {};
-  if (typeof d.threadId === "string") out.threadId = d.threadId;
-  if (typeof d.commentId === "string") out.commentId = d.commentId;
-  const commentIndex = count(d.commentIndex);
-  if (commentIndex !== undefined) out.commentIndex = commentIndex;
-  const sliceTo = count(d.sliceTo);
-  if (sliceTo !== undefined) out.sliceTo = sliceTo;
-  if (d.lead === 1) out.lead = 1;
-  if (d.held === 1) out.held = 1;
-  const signals = count(d.signals);
-  if (signals !== undefined) out.signals = signals;
-  const replyIndex = count(d.replyIndex);
-  if (replyIndex !== undefined) out.replyIndex = replyIndex;
-  if (d.fromTarget === 1) out.fromTarget = 1;
-  const chain = count(d.chain);
-  if (chain !== undefined) out.chain = chain;
-  return out;
-}
-
 /** The stored state of a page: the reply map's place (`current` stays on it while it is unfinished), then the item stream. */
 function cursorState(items: ListState, data: Resume, map: MapAt | undefined): CursorState {
   const mapState: ListState = { kind: "list", shown: map?.entry ?? 0, index: map?.entry ?? 0 };
@@ -214,7 +199,7 @@ function startOf(entry: CursorEntry): Start {
   const mapState = entry.state.streams[MAP_STREAM];
   const state = entry.state.streams[ITEM_STREAM];
   if (mapState?.kind !== "list" || state?.kind !== "list") throw internalError(TOOL, "a cursor without its streams");
-  const data = resumeOf(entry.state.data);
+  const data = (entry.state.data ?? {}) as Resume;   // only this tool mints its cursors (paging/cursor's take checks the tool)
   const map = entry.state.current === MAP_STREAM ? { entry: mapState.index, reply: data.replyIndex ?? 0 } : undefined;
   return { state, data, ...(map !== undefined && { map }) };
 }
@@ -265,12 +250,6 @@ function pageHeaderOf(r: Resolved): PageHeader {
  */
 function postSubject(id: PublicPostId, h: Pick<PostHeader, "af" | "hideCommentKarma" | "debate">): DiscussionSubject {
   return { kind: "post", id, af: h.af, hideCommentKarma: h.hideCommentKarma, debate: h.debate };
-}
-
-/** ¶2.3: a `not_found`/`not_public` remembered for this reference is thrown again without a request (`ids/resolve`'s key). */
-function throwRemembered(ref: ParsedRef, svc: Services): void {
-  const negative = svc.caches.get<{ category: Category; message: string }>("negative", negativeKey(ref));
-  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
 }
 
 /**
@@ -638,7 +617,7 @@ function pageLine(p: PageHeader): string {
 function countedLine(forest: Forest, post: PostHeader | undefined): string {
   const people = new Set<string>();
   for (const node of forest.byId.values()) {
-    if (attributable(node.c) && node.c.author.kind === "user") people.add(node.c.author.id);
+    if (attributable(node.c)) people.add(node.c.author.id);
   }
   const counter = post === undefined ? "" : ` (site counter ~${fmtInt(post.commentCount)})`;
   return `Counted: ${counted(forest.count, "publicly visible comment")} in ${counted(forest.threads.length, "thread")}, ${counted(people.size, "person", "people")}${counter}`;
@@ -728,8 +707,7 @@ type Marker = (node: TreeNode) => "★" | "◆" | undefined;
 function markerFor(targetId: string | undefined, userId: string | undefined): Marker {
   return (node) => {
     if (node.c.id === targetId) return "◆";
-    const a = node.c.author;
-    return userId !== undefined && attributable(node.c) && a.kind === "user" && a.id === userId ? "★" : undefined;
+    return userId !== undefined && attributable(node.c) && node.c.author.id === userId ? "★" : undefined;
   };
 }
 
@@ -1347,8 +1325,7 @@ async function continuation(entry: CursorEntry, p: GetCommentsParams, ctx: CallC
   };
   const page: PageArgs = {
     ask: { sort: stored.sort, afOnly: stored.af_only, limit: stored.limit, ...(stored.match !== undefined && { match: stored.match }) },
-    echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-    args: { ...entry.args }, effective: { ...entry.effective },
+    ...resumedFrom(entry, ctx),
   };
   if (param === "comment") {
     const found = await checkComment(ref, userRef, ctx, svc);
@@ -1378,7 +1355,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetCommentsParams> = {
   name: "get_comments",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   oneOf: [["post", "comment", "tag"]],
   async run(p, ctx, svc) {

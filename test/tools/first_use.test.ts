@@ -138,6 +138,17 @@ describe("first_use: example 4", () => {
     expect(out.text).toMatch(/post "A later mesa post" .* published text not available/);
   });
 
+  it("¶3.9 a published text the forum fails to read is a Partial line in the forum's own words", async () => {
+    const h = createHarness({ families: FAMILIES });
+    h.forum.inject({
+      endpoint: "graphql", when: (b) => b.includes("revision_text"), times: 1,
+      body: JSON.stringify({ data: { r1: null, r2: null, r3: null }, errors: [{ message: "Something went wrong", path: ["r2"] }] }),
+    });
+    const out = await h.call("first_use", { forms: FORMS, limit: 5 });
+    expect(out.isError).toBe(false);
+    expect(out.text).toContain("Partial: published texts unavailable (forum_error: Something went wrong).");
+  });
+
   it("¶8 ¶3.9 a failing history list is a Partial line; that candidate stays listed without a verdict", async () => {
     const failing = { source: "§7.3", match: { root: "revisions", view: "revisionsOnDocument", terms: { documentId: "RloIntroduction01", before: "2019-05-31T00:00:05.001Z" } }, error: { message: "Something went wrong" } };
     const h = createHarness({ families: FAMILIES, extra: [failing] });

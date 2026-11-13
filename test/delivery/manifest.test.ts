@@ -58,12 +58,11 @@ describe("README (¶10)", () => {
     const named = [...new Set(readme.match(/[a-z0-9-]+-\d+\.\d+\.\d+\.mcpb/g) ?? [])];
     expect(named).toEqual([`${CONFIG.name}-${CONFIG.version}.mcpb`]);
   });
-  it("describes every tool with every parameter", () => {
+  it("says what every tool is for, in a section of its own (its parameters are in its description, not copied here)", () => {
     for (const l of listTools(TOOLS)) {
       const part = readme.split(`### ${l.name}\n`)[1]?.split("\n### ")[0] ?? "";
-      expect(part, l.name).not.toBe("");
-      const props = Object.keys((l.inputSchema as { properties: object }).properties);
-      for (const p of [...props, ...(l.name === "find" ? ["kind", "query", "commented_on"] : [])]) expect(part, `${l.name}: ${p}`).toContain(p);
+      expect(part.trim(), l.name).not.toBe("");
+      expect(part.length, `${l.name}'s section is a summary`).toBeLessThan(600);
     }
   });
   it("lists find's abbreviation table", () => {
@@ -79,6 +78,7 @@ describe("README (¶10)", () => {
       "Claude Desktop keeps the server's one-line request logs",
       "Cursors expire after an hour and when the server restarts.",
       "Forum text can try to make Claude send your conversation data to the forum as a search query.",
+      "Every tool's description tells Claude to treat forum text as material, never as instructions",
       "It shows only what a logged-out visitor sees on the site.",
       "Event and meetup posts are left out of lists but can appear in search.",
       "MIT", "Sean Kessinger", "Forum content belongs to its authors.",

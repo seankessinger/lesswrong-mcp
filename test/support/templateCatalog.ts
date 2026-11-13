@@ -2,13 +2,12 @@ import { createCallContext } from "../../src/call/context";
 import { idLit } from "../../src/forum/literal";
 import { findHydrateOps } from "../../src/forum/templates/find";
 import { firstUseHistoryOps, firstUseHydrateOps } from "../../src/forum/templates/first_use";
-import { subjectOps } from "../../src/forum/templates/get_comments";
 import { feedOp } from "../../src/forum/templates/get_feed";
 import { historyDocOps } from "../../src/forum/templates/get_history";
 import { incomingPostsOp, incomingTagOps, linkBodyOp, linkResolutionOps } from "../../src/forum/templates/get_links";
 import { getPostRequest2Ops } from "../../src/forum/templates/get_post";
-import { reactionItemOp, reactorIdsOp } from "../../src/forum/templates/get_reactions";
-import { collectionOp, getSequenceRequest1Ops, getSequenceRequest2Ops } from "../../src/forum/templates/get_sequence";
+import { REACTION_FIELDS, reactorIdsOp } from "../../src/forum/templates/get_reactions";
+import { collectionOp, getSequenceRequest1Ops, getSequenceRequest2Ops, MARKED_POST_FIELDS } from "../../src/forum/templates/get_sequence";
 import { getTagRequest1Ops, getTagRequest2Ops } from "../../src/forum/templates/get_tag";
 import { getUserFollowupOps, getUserMainOps } from "../../src/forum/templates/get_user";
 import { allRecentCommentsOp, topShortformOp } from "../../src/forum/templates/list_comments";
@@ -18,6 +17,8 @@ import { allTagsOp } from "../../src/forum/templates/list_tags";
 import { searchHydrateOps } from "../../src/forum/templates/search";
 import { op, type OpSpec } from "../../src/forum/templates/op";
 import * as T from "../../src/forum/templates/shared";
+import { resolutionOps } from "../../src/ids/resolve";
+import { subjectOps } from "../../src/tools/get_comments";
 import type { GqlOp, PublicId, PublicKind } from "../../src/types";
 
 interface CatalogEntry { name: string; build: () => GqlOp[] }
@@ -101,7 +102,7 @@ export const CATALOG: CatalogEntry[] = [
     build: () => findHydrateOps({
       postIds: ["uMQ3cqWDPHhjtiesc", "zHhGa3iQBQcdSifFL"], postSlugs: ["agi-ruin-a-list-of-lethalities"], userIds: ["nmk3nLpQE89dMRzzN"],
       userSlugs: ["paul-christiano", "paulchristiano", "paul_christiano"], tagIds: ["56yXXrcxRjrQs6z9R"], tagSlugs: ["interpretability"],
-      sequenceIds: ["5g5TkQTe9rmPS5vvM"], collections: true, commentedOn: { id: "uMQ3cqWDPHhjtiesc" },
+      sequenceIds: ["5g5TkQTe9rmPS5vvM"], collections: true,
     }),
   },
   {
@@ -185,11 +186,11 @@ export const CATALOG: CatalogEntry[] = [
   { name: "get_sequence_collection", build: () => [collectionOp("oneQyj4pw77ynzwAF")] },
   {
     name: "get_sequence_req1",
-    build: () => getSequenceRequest1Ops("5g5TkQTe9rmPS5vvM", { kind: "post", form: "idOrSlug", value: "pwLastPost0000001", given: "id", notes: [] }),
+    build: () => getSequenceRequest1Ops("5g5TkQTe9rmPS5vvM", resolutionOps({ kind: "post", form: "idOrSlug", value: "pwLastPost0000001", given: "id", notes: [] }, "p", { post: MARKED_POST_FIELDS })),
   },
   {
     name: "get_sequence_req1_legacy",
-    build: () => getSequenceRequest1Ops("5g5TkQTe9rmPS5vvM", { kind: "post", form: "legacy", value: "2bz", given: "url", notes: [] }),
+    build: () => getSequenceRequest1Ops("5g5TkQTe9rmPS5vvM", resolutionOps({ kind: "post", form: "legacy", value: "2bz", given: "url", notes: [] }, "p", { post: MARKED_POST_FIELDS })),
   },
   { name: "get_sequence_req2", build: () => getSequenceRequest2Ops({ sequenceId: confirmed("sequence", "5g5TkQTe9rmPS5vvM"), listing: true }) },
   // list_sequences, the light set and the hydrate of the page shown
@@ -240,8 +241,9 @@ export const CATALOG: CatalogEntry[] = [
   {
     name: "get_reactions",
     build: () => [
-      reactionItemOp("post", "uMQ3cqWDPHhjtiesc"), reactionItemOp("comment", "HRDoDnHv8bvoW7oPZ"), reactionItemOp("tag", "56yXXrcxRjrQs6z9R"),
-      reactionItemOp("lens", "aaaaaaaaaaaaaaaaa"), reactorIdsOp(["nmk3nLpQE89dMRzzN"])!,
+      T.postByIdOp("p", "uMQ3cqWDPHhjtiesc", REACTION_FIELDS.post), T.commentByIdOp("c", "HRDoDnHv8bvoW7oPZ", REACTION_FIELDS.comment),
+      T.tagByIdOp("t", "56yXXrcxRjrQs6z9R", REACTION_FIELDS.tag), T.multiDocumentByIdOp("m", "aaaaaaaaaaaaaaaaa", REACTION_FIELDS.mdoc),
+      reactorIdsOp(["nmk3nLpQE89dMRzzN"])!,
     ],
   },
   // get_feed, one entry per template with the sample its template test asserts

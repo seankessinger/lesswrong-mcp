@@ -6,11 +6,9 @@
 // never from the forum's drifting counters (Q50.18). Pure: it never throws, never logs and caches nothing.
 import { CONFIG } from "../config";
 import { oneLine } from "../text/sanitize";
-import type { CommentRecord, Forest, Person, RankedThread, Thread, TreeNode } from "../types";
+import type { CommentRecord, Forest, RankedThread, Thread, TreeNode, UserPerson } from "../types";
 import { commentSignals, inReactionSet, visibleReacts, type CommentSignals } from "./reactions";
 import { attributable } from "./visibility";
-
-type UserPerson = Extract<Person, { kind: "user" }>;
 
 export type CommentSort = "top" | "af_top" | "new" | "old" | "largest" | "contested" | "active";
 
@@ -23,8 +21,7 @@ export const NO_SIGNALS_LINE =
 
 /** P19: the named author of an attributable comment, else `null` (deleted placeholder, anonymous author, deleted account). */
 function personOf(c: CommentRecord): UserPerson | null {
-  const author = c.author;
-  return attributable(c) && author.kind === "user" ? author : null;
+  return attributable(c) ? c.author : null;
 }
 
 const byPerson = (userId: string) => (n: TreeNode): boolean => personOf(n.c)?.id === userId;

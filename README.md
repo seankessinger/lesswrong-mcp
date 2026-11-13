@@ -58,67 +58,67 @@ The shared conventions after the last tool apply to all of them.
 
 ### find
 
-Resolves names to exact identifiers, several in one call. `items` is required: 1 to 5 objects `{kind, query, commented_on?}`, resolved independently, where `kind` is `post` (a title), `user` (a display name or handle), `tag` (a topic, tag or wiki page name) or `sequence` (a sequence, book or collection title), `query` is the name to resolve, and `commented_on` (only on `user` items) is a post identifier or `item:N`, the best match of item N of the same call counting from 1, so that post's commenters are matched first. `af_only` keeps Alignment Forum posts and sequences and, for user items, AF members. `limit` counts candidates per item: when an item has more, plain search hits give way first, so what a slug lookup or a second query found stays listed, and the reply says so at its end. `cursor` and `max_tokens` are the shared paging parameters. Each candidate has its ids and enough detail to choose, labelled by how it matched (for example identifier, exact title, exact name, commenter on the post, slug, earlier slug, alias or search); "best match" is marked only when one candidate is clearly right, and otherwise you choose from the list. `find` also searches the long forms of common abbreviations (see the table under "Things the forums do that you should know").
+Turns titles, names and topics into the exact identifiers the other tools take, up to five at once, and can match a person among one post's commenters. A best match is marked only when one candidate is clearly right; common abbreviations are also searched in their long forms (see the table under "Things the forums do that you should know").
 
 ### search
 
-Full-text search of posts, comments, people, wiki pages and sequences. `kind` is `post` (the default), `comment`, `user`, `tag` or `sequence`. `query` is matched loosely; `phrases` are exact phrases that must all occur in the same item; `exclude` lists single words to leave out. Filters are `user` (the primary author), `tag`, `post` (comments on one post), `af_only`, and `date_from` and `date_to` (posts and comments only). `sort` is `relevance` (the default), `new`, `old` or `top`; sequences take every order but `top`, and wiki pages and tags only `relevance`. `limit` counts hits; `cursor` and `max_tokens` page the reply. Every hit is re-read from the forum and checked here against the phrases; the match count is the forum's loose count, results stop 10,000 deep, and one of `query` or `phrases` is required unless a filter is combined with `sort` new, old or top.
+Full-text search of posts, comments, people, wiki pages and sequences, with exact phrases, excluded words, filters by author (the primary author only, so coauthored posts are missed), tag, post, date and Alignment Forum status, and several orders.
 
 ### get_post
 
-Reads one post: metadata, status, structure and text. `post` is required (an id, a URL or the exact current slug). The header gives authors, dates, karma and votes, AF status, the comment count, status flags, tags with relevance, Annual Review results and review comments, the glossary, related questions, the best answer and the canonical sequence with neighbours. `section` reads one numbered section of the outline; `match` keeps only the paragraphs containing a text as whole words, with case, accents and punctuation set aside (not together with `section`); `include_body` (default true) set to false returns everything but the text; `cursor` and `max_tokens` page a long body. Interactive widgets are omitted, and dialogues show speaker names (a message the page shows no name for is an unnamed speaker's), with text between messages marked as outside the dialogue. The text is read from the post's page, as a logged-out reader sees it; if the page can't be read, the text isn't shown, nor is it when the forum's API gives logged-out readers no current version of the post. An old-style debate post's page shows its debate turns instead of the post's own body; that body, where the debate editor asked authors to write their first dialogue comment, is still shown here, labelled, as the forum publishes it elsewhere (in search results, for one). There is no `limit`: the reply is one post.
+Reads one post: its header (authors, dates, karma, Alignment Forum status, tags, Annual Review results, canonical sequence) and its text as the post's page shows it to a logged-out reader, whole, by section or as the paragraphs that match a text. An old-style debate post's page shows its debate turns in place of its own body; that body is shown too, labelled.
 
 ### get_comments
 
-Reads a discussion as ranked, labelled threads, ready for summarizing. Give exactly one of `post` (the whole discussion), `comment` (the thread containing it) or `tag` (a wiki page's discussion). `sort` is `top` (the default), `af_top`, `new`, `old`, `largest`, `contested` or `active`; `limit` counts threads (with `match`, matching comments); `user` keeps the threads that person wrote in, marks their comments and adds a reply map; `match` keeps only comments containing a text as whole words; `af_only` keeps threads with at least one AF comment, whole. The first page also lists the strongest disagreement signals and the comments readers marked as cruxes or as having changed their mind. `cursor` and `max_tokens` page the reply.
+Reads the discussion of a post, a comment's thread or a wiki page as ranked, labelled threads, with the strongest disagreement signals, cruxes and changed-mind marks; it can follow one person's comments and the replies to them.
 
 ### list_posts
 
-Lists posts with filters, best first or by date. `user` (their own and coauthored posts), `tag` (posts tagged with it, whether readers or the site's tagging bot applied the tag), `date_from` and `date_to` (posting date), `af_only`, `curated_only`, `frontpage_only`, `questions_only` and `min_karma` are the filters. `sort` is `top` (the default when `tag` is given), `new` (the default otherwise), `old`, `active`, `tag_relevance` (needs `tag`), `curated_date` (needs `curated_only`) or `af_top` (needs `user` or `tag`). `query` (only with `tag`) adds, after the tagged posts, untagged posts that match those words. `limit` counts posts; `cursor` and `max_tokens` page the reply. Event and meetup posts are left out (see "What it does not offer"). An old-style debate post has no excerpt: its page shows the debate turns in place of its body, and the site's own preview of it shows its first turn rather than its body.
+Lists posts by a person or a tag, by date, Alignment Forum status, curation, frontpage, questions or karma, best first or by date.
 
 ### list_comments
 
-Lists comments across the site or by one person: what someone has been commenting on, the latest comments site-wide, or quick takes. `user`, `date_from` and `date_to`, `af_only`, `quick_takes_only` (top-level quick takes only) and `min_karma` are the filters; `sort` is `new` (the default), `old` or `top`. Without `user`, `sort` top and `quick_takes_only` each need both dates, at most 31 days apart. `limit` counts comments; `cursor` and `max_tokens` page the reply. Each comment shows where it is, who it replies to, its karma, agreement, reactions and flags, and its text (cut at about 1,500 tokens; `get_comments` with `comment` shows it whole).
+Lists comments by one person or across the site, or quick takes, by date or by karma, each with where it is and who it replies to.
 
 ### get_user
 
-A person's public profile and recent activity in one call. `user` is required (an id, a profile URL or an exact, case-sensitive slug). It returns display name, ids, karma and AF karma, AF membership, counts, bio, job, organization, links and pinned posts, and `limit` items in each of: top posts, latest posts, latest comments, sequences and recent wiki edits. `af_only` limits the post, comment and sequence sections to AF items. Each section ends with the call that continues it; `cursor` and `max_tokens` page the reply.
+A person's public profile and recent activity in one call: karma and AF karma, bio and links, pinned posts, and their top and latest posts, latest comments, sequences and recent wiki edits.
 
 ### get_tag
 
-A tag or wiki page: its text and its top posts in one call. `tag` is required (an id, a `/w/…`, `/tag/…` or `/p/…` URL, or an exact slug; earlier slugs, Arbital ids and lens slugs work). It returns the page type, parent tag and subtags, likes, the wiki text as Markdown with an outline, lenses, summaries, related Arbital pages, the discussion count and, for a core tag, a preview of the tags grouped under it. `section` reads one numbered section and `match` keeps only paragraphs containing a text as whole words (not both). `sort` orders the posts: `top` (the default), `tag_relevance`, `new` or `old`; `limit` counts posts; `af_only` applies to the posts. `cursor` and `max_tokens` page the reply. An admin-only page opens as it does on the site, from its URL, and is flagged `admin-only (left off posts and out of search)`: the site leaves it out of posts' tags, search and recent discussion, but lists it on its concepts page.
+A tag or wiki page in one call: its wiki text with an outline, lenses, summaries, parent and subtags, likes and discussion count, and its top tagged posts.
 
 ### get_sequence
 
-A sequence (an ordered series of posts) or one of the five collections (`rationality`, `codex`, `hpmor`, `highlights`, `bestoflesswrong`). `sequence` is required (an id, a URL or a collection slug). It lists the sequence's posts chapter by chapter in the forum's chapter order; for a collection, its books and their sequences. `post` marks a post in the sequence, starts the first page at its chapter and shows its position with the previous and next posts. `limit` counts posts (for a collection, sequences); `af_only` keeps only AF posts; `cursor` and `max_tokens` page the reply.
+A sequence's posts chapter by chapter, or the books and sequences of one of the five collections; given a post, where it stands in the sequence, with the posts before and after it.
 
 ### list_sequences
 
-Lists sequences: every public sequence (the default), a person's (`user`), or the curated ones (`curated_only`). `af_only` keeps AF sequences. `sort` is `site_order` (the default), `new` or `old`; `limit` counts sequences; `cursor` and `max_tokens` page the reply. Each item shows its ids, title, author, post count (approximate), creation date, AF status and a description excerpt. Open one with `get_sequence`.
+Lists every public sequence, a person's, or the curated ones.
 
 ### get_history
 
-Edit history of a post or a wiki page, or the wiki edits of a person. Give exactly one of `post`, `tag` (a lens slug or summary id gives that part's own history) or `user` (wiki edits only). A comment's earlier versions are not available. Without `revision`, it lists the publicly visible versions, newest first (`sort` is `new` or `old`; `limit` counts versions), with the original marked. `revision` (a revision id, `original` or `current`) returns that version's text, and `match` keeps only the paragraphs containing a text as whole words. `compare_to` (a revision id, `original`, `previous` or `current`; needs `revision`) returns the word-level changes between two versions. `phrases` checks each phrase in the original and current text and finds the first version that contains it. `cursor` and `max_tokens` page the reply. A post's text comes from that version's page: a version whose page can't be read gives an error, and a version saved between February and July 2026 shows `[equation]` where its page holds no equation text. A dialogue's versions show no word count.
+The edit history of a post or a wiki page, or a person's wiki edits: the public versions, any version's text, the word changes between two versions, and the first version containing a phrase. A comment's earlier versions are not available.
 
 ### first_use
 
-Who first used a phrase, and was it in the original text? `forms` is required: the phrase and up to 4 other forms of it (word endings are not matched, so give each inflection yourself). It searches posts, and comments unless `include_comments` is false, oldest first, keeps only hits that really contain a form, and checks the edit history of the earliest posts. A comment edited after posting holds the phrase now but can't be verified, because its earlier versions are not available. `af_only` searches AF items only; `limit` counts candidates per page; `cursor` and `max_tokens` page the reply. The answer means "the earliest public use that could be verified", not a guaranteed first use. The first page holds the oldest hits of every form; later pages add the next hits of each form, so a continuation's "Earliest verified on this page" is the earliest of that page only.
+Who first used a phrase on LessWrong or the Alignment Forum, and whether it was in the original text: it searches oldest first and checks the earliest posts' edit histories. The answer is the earliest public use that could be verified, not a guaranteed first use; a later page adds the next hits of each form, so its "Earliest verified on this page" is the earliest of that page only.
 
 ### get_links
 
-Links between posts and wiki pages. Give exactly one of `post` (incoming links come from posts whose current text links to it; outgoing links are every link in its text, resolved) or `tag` (the wiki pages the forum's link index records as linking to the page, often only some of them, and the links in its text). `direction` is `both` (the default), `incoming` or `outgoing`. `sort` (incoming posts only) is `top` (the default), `new` or `old`; `af_only` keeps AF posts and comments among the links; `limit` counts incoming items; `cursor` and `max_tokens` page the reply.
+Which posts link to a post and which wiki pages link to a wiki page, as far as the forum's link index records them (it misses some), and where the links in a post's or page's text lead.
 
 ### get_reactions
 
-Votes, agreement, likes and reactions on one post, comment or wiki page, in detail. Give exactly one of `post`, `comment` or `tag`. It returns karma and vote counts, AF karma for AF items, the agreement score (comments only), a wiki page's likes with who liked it, and every reaction the site shows, with who added, seconded or disputed it and the passage it is anchored to. `cursor` and `max_tokens` page the reply; there is no `limit`, because the reply is one item.
+Votes, agreement, likes and reactions on one post, comment or wiki page, with who reacted and the passage a reaction is anchored to.
 
 ### get_feed
 
-Site-level feeds. `feed` is required: `frontpage` (an approximation of the logged-out home page), `recent_discussion`, `popular_comments`, `quick_takes`, `this_week`, `wiki_activity`, `dialogues`, `best_of` or `spotlight`. `af_only` keeps AF items in the same order (not for `wiki_activity`). `date_from`, `date_to` and `sort` (`new`, the default, or `old`) apply to `best_of` only. `limit` counts items per page and is not accepted for `spotlight`; `cursor` and `max_tokens` page the reply. Each feed except `best_of` keeps the forum's own order. `recent_discussion` leaves out a post with no comment listed under it, unless it was probably never commented on, as the forum's Recent Discussion list does; it also leaves out a quick-takes item with no quick take listed, which that list can still show as an empty card.
+The site's feeds: an approximation of the front page, recent discussion, popular comments, quick takes, the week's curated and frontpaged posts, wiki activity, dialogues, Best of LessWrong and the spotlight.
 
 ### list_tags
 
-Lists tags. Without `tag`: every tag that can be applied to posts (about 1,010), alphabetically. With `tag` set to one of the 7 core tags (`rationality`, `ai`, `world-modeling`, `world-optimization`, `practical`, `community`, `site-meta`): all the tags grouped under it, in the forum's order, including wiki-only pages (labelled) and admin-only pages (flagged). The list without `tag` leaves admin-only tags out, as the forum's list of all tags does; they open by id or slug. `limit` counts tags; `cursor` and `max_tokens` page the reply. There is no `af_only` and no `sort`. Open a tag with `get_tag`.
+Lists every tag that can be applied to posts, alphabetically, or all the tags grouped under one of the 7 core tags. The full list leaves admin-only tags out, as the forum's own list does; they open by id or slug.
 
 ### Shared conventions
 
@@ -263,7 +263,7 @@ For tag and sequence items, `find` also searches the long form of these abbrevia
 - No cookies are sent and nothing logs in.
 - No cache or data files are written. The server logs one line per request to stderr (template label, status, time, size and whether the cache answered; no content, no titles and no ids), and Claude Desktop keeps the server's one-line request logs in its own log files. `LESSWRONG_MCP_DEBUG=1` adds diagnostic lines, never ids or text.
 - Cursors expire after an hour and when the server restarts. A cursor is a random token; the state it names stays in the server's memory and is never shown.
-- Warning: Forum text can try to make Claude send your conversation data to the forum as a search query. All text from the forums, titles and names included, is written by forum users and may address AI systems. The server's instructions tell Claude to treat forum text as material, never as instructions, and not to send your own information to the forum as a search query, and the server marks the boundaries of every block of forum text in a reply. These are measures, not guarantees: you should know that search queries go to the forum.
+- Warning: Forum text can try to make Claude send your conversation data to the forum as a search query. All text from the forums, titles and names included, is written by forum users and may address AI systems. Every tool's description tells Claude to treat forum text as material, never as instructions, and not to send your own information to the forum as a search query, and the server marks the boundaries of every block of forum text in a reply. These are measures, not guarantees: you should know that search queries go to the forum.
 
 ## Development
 

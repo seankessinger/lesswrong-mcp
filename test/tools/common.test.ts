@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { setting, handOffCall, positionText, nextText, openContinuation, checkContinuation, reply, mint, givenArgs } from "../../src/tools/common";
+import { setting, handOffCall, positionText, nextText, openContinuation, checkContinuation, reply, mint, givenArgs, searchHitId } from "../../src/tools/common";
+import type { SearchHit } from "../../src/types";
 import { createCallContext } from "../../src/call/context";
 import { CURSOR_RE } from "../../src/paging/cursor";
 import { createFakeForum } from "../fakeForum";
@@ -57,5 +58,15 @@ describe("tools/common", () => {
   it("reply renders one page with the footer", () => {
     const out = reply({ tool: "find", subject: "1 item", request: ["items 1–1", "limit 10 (default)"], notes: [], head: [], items: [{ text: "Item 1" }] }, 15000, svc(), () => ({ kind: "end" }));
     expect(out).toEqual({ isError: false, text: "find — 1 item\nRequest: items 1–1 · limit 10 (default)\nItem 1\nEnd of results." });
+  });
+});
+
+describe("tools/common: a search hit's id", () => {
+  const hit = (o: Record<string, unknown>) => o as unknown as SearchHit;
+  it("is the hit's _id, else its objectID, and only when that is an entity id held as a string", () => {
+    expect(searchHitId(hit({ _id: "uMQ3cqWDPHhjtiesc", objectID: "zHhGa3iQBQcdSifFL" }))).toBe("uMQ3cqWDPHhjtiesc");
+    expect(searchHitId(hit({ objectID: "zHhGa3iQBQcdSifFL" }))).toBe("zHhGa3iQBQcdSifFL");
+    expect(searchHitId(hit({ objectID: "not an id" }))).toBeUndefined();
+    expect(searchHitId(hit({ objectID: 12345678901234567 }))).toBeUndefined();
   });
 });

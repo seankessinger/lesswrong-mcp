@@ -9,6 +9,7 @@
 import { internalError } from "../../errors";
 import type { GqlOp } from "../../types";
 import { bool, enumTerm, idLit, int, list, obj, str } from "../literal";
+import { dateBoundLit } from "./shared";
 import { op } from "./op";
 
 export type PostsView = "userPosts" | "tagRelevance" | "new" | "old" | "top" | "recentComments" | "curated";
@@ -34,14 +35,9 @@ const SORTED_BY: readonly SortedBy[] = ["new", "old", "top", "recentComments"];
 const SORTED_BY_TAG_RELEVANCE: readonly SortedBy[] = [...SORTED_BY, "relevance"];
 /** R4, §6.2: the named fragments `filter` selects. */
 const FILTERS: readonly Filter[] = ["curated", "frontpage"];
-const DATE_BOUND_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const FIELDS = { excerpt: "...POST_CARD_EXCERPT", light: "...POST_LIGHT" } as const;
 
-function dateTerm(bound: string | undefined): string | undefined {
-  if (bound === undefined) return undefined;
-  if (!DATE_BOUND_RE.test(bound)) throw internalError(TEMPLATE, "not a YYYY-MM-DDTHH:MM:SS.SSSZ date");
-  return str(bound, "date");
-}
+const dateTerm = (bound: string | undefined): string | undefined => (bound === undefined ? undefined : dateBoundLit(TEMPLATE, bound));
 
 /** R7: `{tags: [{tagId, filterMode: "Required"}]}`, the filter that keeps only the posts tagged with `tagId`. */
 function requiredTag(tagId: string): string {

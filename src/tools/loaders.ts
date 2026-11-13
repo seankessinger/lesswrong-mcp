@@ -15,23 +15,26 @@
 // whole and the rest sorted by `editedAt`, newest first; `get_history {user}` pages it and `get_user` previews
 // it, so `get_user`'s hand-off cursor indexes into the same set. `aliasData` reads one alias of a loader's or a tool's answer:
 // the forum's "nothing here" and its refusal read as no data (list members and joins are dropped silently, ¶8), and any other
-// alias error becomes the call's error, worded as ¶3.9 says.
+// alias error becomes the call's error, worded as ¶3.9 says (`failureOf`). A later request of a call, whose failure is a
+// `Partial:` line and not the call's error (¶7), is sent by `send` and read part by part with `partOf` and `aliasPart` (get_post,
+// get_tag, get_sequence, get_user). `revisionTexts` reads revision texts through the `revtext` cache and `introductionRounds`
+// runs the phrase search's rounds, for `get_history` and `first_use` alike.
 import { CONFIG } from "../config";
 import { buildForest } from "../domain/comments";
 import { pageText } from "../domain/markdown";
-import { toRevisionRecord } from "../domain/revisions";
+import { findIntroduction, toRevisionRecord, type IntroSeries, type IntroState } from "../domain/revisions";
 import { maskPostRef, revisionRowPublic, sequencePublic, tagListable, wikiEditPage } from "../domain/visibility";
-import { forumError, internalError, isTooLarge, loginOnly, ToolError } from "../errors";
+import { CallStopped, forumError, internalError, isTooLarge, isToolError, loginOnly, ToolError } from "../errors";
 import {
-  collectionsListingOp, commentForestOps, commentsByIdsOps, CORE_GROUPING_LIMIT, coreGroupingOp, revisionsByUserOp, tagForestOp,
+  collectionsListingOp, commentForestOps, commentsByIdsOps, CORE_GROUPING_LIMIT, coreGroupingOp, revisionsByUserOp, revisionTextOp, tagForestOp,
 } from "../forum/templates/shared";
 import { compareLocal, lightScan, type RawPage } from "../paging/pager";
-import { FLAG } from "../render/messages";
+import { FLAG, partialLine } from "../render/messages";
 import { postRefText } from "../render/records";
 import { blockText, oneLine } from "../text/sanitize";
 import type {
   AliasResult, AliasResults, CallContext, Forest, GqlOp, PublicPostId, PublicTagId, RawBook, RawCollection, RawCommentRef,
-  RawCommentTree, RawPostRef, RawRevRow, RawTagList, RevisionDoc, RevisionRecord, Services,
+  RawCommentTree, RawPostRef, RawRevRow, RawTagList, RevisionDoc, RevisionRecord, Services, StopReason,
 } from "../types";
 import { isRecord, rowsOf } from "./common";
 
@@ -69,7 +72,7 @@ const GROUPING_TASK = "reading the tags under a core tag";
 const WIKI_EDITS_TASK = "reading the wiki edits";
 
 /** An alias error that is more than "nothing here", as the error of the call (¶3.9 wording; `internal` already names its template). */
-function failureOf(r: Extract<AliasResult, { error: unknown }>, task: string, ctx: CallContext): ToolError {
+export function failureOf(r: Extract<AliasResult, { error: unknown }>, task: string, ctx: CallContext): ToolError {
   switch (r.error) {
     case "internal":
       return internalError(ctx.tool, r.message);
@@ -94,6 +97,56 @@ export function aliasData(results: AliasResults, alias: string, task: string, ct
     throw failureOf(r, task, ctx);
   }
   return r.data;
+}
+
+/** What a later request gave: nothing to send, a stop (deadline or cap), the whole request's failure, or its answer. */
+export type Sent = { kind: "none" } | { kind: "stopped"; why: StopReason } | { kind: "failed"; error: ToolError } | { kind: "ok"; results: AliasResults };
+
+/**
+ * A later request of a call, whose failure is a `Partial:` line and not the call's error (¶7). `checkFirst`: not sent at all once
+ * no request may start, so that not even a cached answer is used (get_post's requests 2 and 3, get_sequence's request 3).
+ */
+export async function send(ops: readonly GqlOp[], task: string, ctx: CallContext, svc: Services, checkFirst = false): Promise<Sent> {
+  if (ops.length === 0) return { kind: "none" };
+  if (checkFirst && !ctx.mayStartRequest()) return { kind: "stopped", why: ctx.stopped ?? "time limit" };
+  try {
+    return { kind: "ok", results: await svc.gql(ops, ctx, task) };
+  } catch (e) {
+    if (e instanceof CallStopped) return { kind: "stopped", why: e.reason };
+    if (isToolError(e)) return { kind: "failed", error: e };
+    throw e;
+  }
+}
+
+/** One part of an answer: its data (`undefined` when the forum had nothing), or not read, with the `Partial:` line of a failure. */
+export type Part = { ok: true; data: unknown } | { ok: false; partial?: string };
+
+/**
+ * The part `alias` of an answer, for `section`: the forum's "nothing here" (`not_found`, `not_public`) is no data, any other
+ * alias error is the part's `Partial:` line with the error as the forum gave it (¶3.9), and an alias the answer lacks is not read.
+ * `partials`, when given, also gets the line.
+ */
+export function aliasPart(results: AliasResults, alias: string, section: string, partials?: string[]): Part {
+  const r = results.get(alias);
+  if (r === undefined) return { ok: false };
+  if (!("error" in r)) return { ok: true, data: r.data };
+  if (r.error === "not_found" || r.error === "not_public") return { ok: true, data: undefined };
+  return failedPart(partialLine(section, new ToolError(r.error, r.message)), partials);
+}
+
+/**
+ * The part `alias` of a later request, read only when `ops` asked for it: the failure of the whole request is the part's
+ * `Partial:` line; a request not sent or stopped is not read, and says nothing. `partials`, when given, also gets the line.
+ */
+export function partOf(sent: Sent, ops: readonly GqlOp[], alias: string, section: string, partials?: string[]): Part {
+  if (!ops.some((o) => o.alias === alias)) return { ok: false };
+  if (sent.kind === "failed") return failedPart(partialLine(section, sent.error), partials);
+  return sent.kind === "ok" ? aliasPart(sent.results, alias, section, partials) : { ok: false };
+}
+
+function failedPart(partial: string, partials: string[] | undefined): Part {
+  partials?.push(partial);
+  return { ok: false, partial };
 }
 
 /** The entry (and its cache key) each forest was built from, so that `loadBodies` adds to the rows that forest came from. */
@@ -400,4 +453,83 @@ export async function readRevisions(ops: readonly GqlOp[], task: string, ctx: Ca
  */
 export function postText(field: Record<string, unknown>, speakers = false): string | undefined {
   return pageText({ html: typeof field.html === "string" ? field.html : undefined, speakers });
+}
+
+/** A revision whose text is wanted: its id, the revision whose page is read (`source`), and the document both are of. */
+export interface WantedText { id: string; source: string; docId: string }
+
+/**
+ * ¶4.11 step 6, ¶4.12 step 7, P17: the texts of the revisions `wanted`, each of a visible list of a confirmed document, by id.
+ * Cached texts (`revtext`, 6 hours) cost nothing; the rest are fetched in one request, `r1`…`rN` in the order given. The cache
+ * is keyed by `source`, the revision whose page was read (a post row's folded image copy, else the row), so that `get_history`
+ * and `first_use` never serve each other a different page under one id, and a text with its speakers named apart from the same
+ * text without them (#65). A post's text is its page; a wiki page's or lens's is its Markdown (an image copy rewrites only the
+ * html). A text the forum no longer returns, or one of another document, is left out; `error` is the first problem in alias
+ * order: an alias error beyond "nothing here", as the forum gave it, or a post's missing page.
+ */
+export async function revisionTexts(
+  wanted: readonly WantedText[], o: { post: boolean; speakers?: boolean }, task: string, ctx: CallContext, svc: Services,
+): Promise<{ texts: Map<string, string>; error?: Extract<AliasResult, { error: unknown }> | "no page" }> {
+  const key = (w: WantedText): string => (o.speakers === true ? `${w.source}#speakers` : w.source);
+  const texts = new Map<string, string>();
+  const missing: WantedText[] = [];
+  for (const w of new Map(wanted.map((x) => [x.id, x])).values()) {
+    const cached = svc.caches.get<string>("revtext", key(w));
+    if (cached === undefined) missing.push(w);
+    else texts.set(w.id, cached);
+  }
+  if (missing.length === 0) return { texts };
+  const ops = missing.map((w, i) => revisionTextOp(`r${i + 1}`, ctx.confirmPublic("revision", w.source), o.post));
+  const results = await readRevisions(ops, task, ctx, svc);
+  let error: Extract<AliasResult, { error: unknown }> | "no page" | undefined;
+  missing.forEach((w, i) => {
+    const r = results.get(`r${i + 1}`);
+    if (r === undefined) return;
+    if ("error" in r) {
+      if (r.error !== "not_found" && r.error !== "not_public") error ??= r;
+      return;
+    }
+    const result = isRecord(r.data) ? r.data.result : undefined;
+    if (!isRecord(result) || result._id !== w.source || result.documentId !== w.docId) return;
+    const text = o.post ? postText(result, o.speakers) : typeof result.markdown === "string" ? result.markdown : "";
+    if (text === undefined) {
+      error ??= "no page";
+      return;
+    }
+    svc.caches.set("revtext", key(w), text);
+    texts.set(w.id, text);
+  });
+  return { texts, ...(error !== undefined && { error }) };
+}
+
+/** ¶4.11 step 8, ¶4.12 step 8: at most this many rounds of the phrase search per call, each one request of up to `PROBES` texts. */
+const INTRO_ROUNDS = 2;
+const PROBES = 10;
+
+/**
+ * ¶4.11 step 8, ¶4.12 step 8: the phrase search, `findIntroduction` run one round at a time from the intervals the round before
+ * left (`state`, a cursor's, to begin with), at most `INTRO_ROUNDS` rounds and no more than the requests the call has left; the
+ * first pass sends nothing (adjacent rows need no text). A round refused by the request cap or the 40 s mark (`stopped`), or
+ * whose texts fail (`error`), keeps what the earlier rounds narrowed. Rounds the cap left out, with an interval still open, are a
+ * stop too ("request cap").
+ */
+export async function introductionRounds(
+  series: readonly IntroSeries[], fetchTexts: (ids: readonly string[]) => Promise<ReadonlyMap<string, string>>, ctx: CallContext, state?: IntroState,
+): Promise<{ search: Awaited<ReturnType<typeof findIntroduction>>; stopped?: StopReason; error?: ToolError }> {
+  const rounds = Math.max(0, Math.min(INTRO_ROUNDS, ctx.maxRequests - ctx.requestsUsed));
+  let search = await findIntroduction(series, fetchTexts, { rounds: 0, probes: PROBES, ...(state !== undefined && { state }) });
+  let stopped: StopReason | undefined;
+  let error: ToolError | undefined;
+  for (let round = 0; round < rounds && Object.keys(search.between).length > 0; round++) {
+    try {
+      search = await findIntroduction(series, fetchTexts, { rounds: 1, probes: PROBES, state: search.state });
+    } catch (e) {
+      if (e instanceof CallStopped) stopped = e.reason;
+      else if (isToolError(e)) error = e;
+      else throw e;
+      break;
+    }
+  }
+  if (stopped === undefined && rounds < INTRO_ROUNDS && Object.keys(search.between).length > 0) stopped = "request cap";
+  return { search, ...(stopped !== undefined && { stopped }), ...(error !== undefined && { error }) };
 }

@@ -2,6 +2,9 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { findIntroduction, toRevisionRecord, wordDiff, type IntroState } from "../../src/domain/revisions";
 import { classify } from "../../src/text/phrases";
+import { createCallContext } from "../../src/call/context";
+import { CallStopped, ToolError } from "../../src/errors";
+import { introductionRounds } from "../../src/tools/loaders";
 import type { RevisionDoc, RevisionRecord } from "../../src/types";
 import { rawRevRow } from "../support/builders";
 
@@ -251,5 +254,50 @@ describe("findIntroduction (¶4.11 step 8, ¶4.12 step 8)", () => {
     const t = texts([[rows[0], "Nothing."], [rows[1], "The Newcomb problem is old."], [rows[2], "Newcomb's problem appears."]]);
     const res = await findIntroduction([{ key: "p", rows, phrases: [classify("Newcomb's problem", "phrases")] }], t.fetch, { rounds: 2, probes: 10 });
     expect(res.found["p|Newcomb's problem"].id).toBe(rows[2].id);
+  });
+});
+
+// The rounds get_history (¶4.11 step 8) and first_use (¶4.12 step 8) run: tools/loaders' `introductionRounds`.
+describe("introductionRounds", () => {
+  const now = () => Date.parse("2026-10-22T12:00:00.000Z");
+  const ctxWith = (maxRequests?: number) => createCallContext("get_history", { now, ...(maxRequests !== undefined && { maxRequests }) });
+  const KEY = "p|mesa optimizer";
+
+  it("at most two rounds and no more than the requests left; rounds the cap leaves out, with an interval open, are a request-cap stop", async () => {
+    const rows = history("ir", 121);
+    const series = [{ key: "p", rows, phrases: [MESA] }];
+    const two = texts(phraseAt(rows, (i) => i >= 57));
+    const full = await introductionRounds(series, two.fetch, ctxWith());
+    expect(two.calls).toHaveLength(2);
+    expect(full.stopped).toBeUndefined();
+    expect(full.search.found[KEY]?.id).toBe(rows[57]!.id);
+    const one = texts(phraseAt(rows, (i) => i >= 57));
+    const capped = await introductionRounds(series, one.fetch, ctxWith(1));
+    expect(one.calls).toHaveLength(1);
+    expect(capped.stopped).toBe("request cap");
+    expect(Object.keys(capped.search.between)).toEqual([KEY]);
+    // Two rounds that leave an interval open are not a stop: the cursor's next page goes on.
+    const wide = history("iw", 2000);
+    const many = await introductionRounds([{ key: "p", rows: wide, phrases: [MESA] }], texts(phraseAt(wide, (i) => i >= 1500)).fetch, ctxWith());
+    expect(Object.keys(many.search.between)).toEqual([KEY]);
+    expect(many.stopped).toBeUndefined();
+  });
+
+  it("a round stopped or failing keeps what the rounds before it narrowed; any other error is thrown", async () => {
+    const rows = history("is", 121);
+    const series = [{ key: "p", rows, phrases: [MESA] }];
+    const failingSecond = (e: Error) => {
+      const t = texts(phraseAt(rows, (i) => i >= 57));
+      return async (ids: readonly string[]) => (t.calls.length === 1 ? Promise.reject(e) : t.fetch(ids));
+    };
+    const stopped = await introductionRounds(series, failingSecond(new CallStopped("time limit")), ctxWith());
+    expect(stopped.stopped).toBe("time limit");
+    expect(stopped.error).toBeUndefined();
+    const narrowed = stopped.search.between[KEY]!;
+    expect(rows.indexOf(narrowed.to) - rows.indexOf(narrowed.from)).toBeLessThan(20);
+    const error = new ToolError("forum_error", "Round two failed.");
+    const failed = await introductionRounds(series, failingSecond(error), ctxWith());
+    expect(failed).toEqual({ search: stopped.search, error });
+    await expect(introductionRounds(series, failingSecond(new TypeError("bug")), ctxWith())).rejects.toThrow("bug");
   });
 });

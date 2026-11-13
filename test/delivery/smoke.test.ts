@@ -1,12 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { smokeChecks, type SmokeInput } from "../../scripts/smoke";
-import { CONVENTIONS_LINE } from "../../src/params/vocabulary";
+import { FORUM_TEXT } from "../../src/params/vocabulary";
+import { INSTRUCTIONS } from "../../src/server";
 import { TOOL_ORDER } from "../../src/tools/registry";
 import { connectStdioClient } from "../support/mcpClient";
 
 const names = [...TOOL_ORDER];
 const good: SmokeInput = {
-  tools: names.map((name) => ({ name, description: "Something.\n\n" + CONVENTIONS_LINE })),
+  instructions: INSTRUCTIONS,
+  tools: names.map((name) => ({ name, description: `Something.\n\n${FORUM_TEXT}` })),
   manifestTools: names,
   call: { isError: true, text: 'Error (bad_input): post: "a title, not an id" is not an identifier. Use find to turn a title into a post_id.' },
   stderr: "[lesswrong-mcp] node v22.11.0\n[lesswrong-mcp] ready\n",
@@ -19,8 +21,12 @@ describe("smoke checks (¶9.4)", () => {
   });
   it("names each failure", () => {
     expect(smokeChecks({ ...good, tools: good.tools.slice(1) })).toEqual(["tools: the server's tool names differ from the manifest's"]);
-    expect(smokeChecks({ ...good, tools: [{ name: "find", description: "no conventions" }, ...good.tools.slice(1)] }))
-      .toEqual(["description: find does not end with the conventions line"]);
+    expect(smokeChecks({ ...good, instructions: undefined })).toEqual(["instructions: the server's initialize instructions are not INSTRUCTIONS"]);
+    expect(smokeChecks({ ...good, instructions: INSTRUCTIONS.slice(1) })).toEqual(["instructions: the server's initialize instructions are not INSTRUCTIONS"]);
+    expect(smokeChecks({ ...good, tools: [{ name: "find", description: "Something." }, ...good.tools.slice(1)] }))
+      .toEqual(["description: find does not end with the forum-text warning"]);
+    expect(smokeChecks({ ...good, tools: [{ name: "find", description: `${"x".repeat(4_000)}\n\n${FORUM_TEXT}` }, ...good.tools.slice(1)] }))
+      .toEqual(["description: find is over 4,096 characters, which Claude Code cuts"]);
     expect(smokeChecks({ ...good, call: { isError: false, text: "get_post — x" } }))
       .toEqual(['bad_input: expected an isError reply starting "Error (bad_input): post: ", got "get_post — x"']);
     expect(smokeChecks({ ...good, transportErrors: ["Unexpected token 'h', \"hello\" is not valid JSON", "x"] }))

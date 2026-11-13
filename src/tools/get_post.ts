@@ -21,24 +21,26 @@ import { toPostRecord } from "../domain/posts";
 import { parseReactions, reactSummary, visibleReacts } from "../domain/reactions";
 import { adjacentSequence, neighbours, readingOrder } from "../domain/sequences";
 import { authorOf, commentPublic, glossaryTermPublic, isPlaceholder, maskPostRef, sequencePublic } from "../domain/visibility";
-import { badInput, CallStopped, isToolError, loginOnly, notFound, ToolError } from "../errors";
+import { badInput, loginOnly, notFound } from "../errors";
 import { getPostRequest2Ops, neighbourChaptersOp } from "../forum/templates/get_post";
 import { parseRef } from "../ids/parse";
-import { echoOf, negativeKey, readResolution, resolutionOps } from "../ids/resolve";
+import { echoOf, readResolution, resolutionOps, throwRemembered } from "../ids/resolve";
 import { sliceAfter, slicePosition } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { fitsWhole } from "../render/layout";
-import { CAVEAT, FLAG, fmtInt, matchLine, partialLine } from "../render/messages";
+import { CAVEAT, FLAG, fmtInt, matchLine } from "../render/messages";
 import { IMPORTED_BEFORE_MS } from "../domain/revisions";
-import { afBlock, commentRefText, matchHitItem, personText, postRefText, quote, statusTexts, textOutlineLine } from "../render/records";
+import { afBlock, commentRefText, counted, matchHitItem, personText, postRefText, quote, statusTexts, tagsText, textOutlineLine } from "../render/records";
 import { day, minute } from "../text/dates";
 import { blockText, oneLine } from "../text/sanitize";
 import type {
-  AliasResults, CallContext, CappedBlock, Consumed, CursorEntry, CursorState, Footer, GqlOp, PageItem, PageSpec, ParsedRef, PostRecord,
+  AliasResults, CallContext, CappedBlock, Consumed, CursorEntry, CursorState, Footer, PageItem, PageSpec, ParsedRef, PostRecord,
   PublicPostId, RawChapter, RawCommentRef, RawPostFull, RawPostRef, Resolved, Services, StreamState, ToolDef, ToolOutput,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, openContinuation, reply, rowsOf, setting } from "./common";
-import { bookSequenceRow, collectionsCached, crossText, DIR_WORD, loadCollectionsListing, UNORDERED, type Dir } from "./loaders";
+import { checkContinuation, givenArgs, isRecord, mint, openContinuation, reply, resumedFrom, rowsOf, setting } from "./common";
+import {
+  bookSequenceRow, collectionsCached, crossText, DIR_WORD, loadCollectionsListing, partOf, send, UNORDERED, type Dir, type Part,
+} from "./loaders";
 
 type GetPostParams = { post?: string; section?: number; match?: string; include_body: boolean; cursor?: string; max_tokens: number };
 
@@ -68,8 +70,6 @@ const TITLE_CAP = CONFIG.render.caps.title;
 const NAME_CAP = CONFIG.render.caps.name;
 const VERSION_CAP = 40;
 const SEP = " · ";
-/** ¶3.8.1: at most this many tags, then `+N more`. */
-const TAGS_SHOWN = 6;
 /** The reviews request's limit (templates/shared.ts): a full answer may have left reviews out. */
 const REVIEWS_LIMIT = 50;
 /** ¶4.3 step 7: the last line of the reviews block after a full answer of `REVIEWS_LIMIT` rows. */
@@ -96,8 +96,6 @@ const BLOCK_NEXT: Readonly<Record<BlockKey, (at: number) => string>> = {
 };
 
 const quoted = (s: string | null | undefined, cap: number): string => `"${oneLine(s, cap)}"`;
-/** A whole count with its noun: `1 vote`, `612 votes`. */
-const counted = (n: number, one: string): string => `${fmtInt(n)} ${n === 1 ? one : `${one}s`}`;
 /** §14.6: review vote scores carry float noise; one decimal, grouped. */
 const score = (n: number): string => fmtInt(Math.round(n * 10) / 10);
 
@@ -127,51 +125,12 @@ function requestEcho(r: Resolved, ask: Ask, echo: CallContext): string[] {
  * request. A post flagged for logged-in readers only is refused as `login_only`.
  */
 async function readPost(ref: ParsedRef, ctx: CallContext, svc: Services): Promise<{ resolved: Resolved; doc: RawPostFull }> {
-  const negative = svc.caches.get<{ category: ToolError["category"]; message: string }>("negative", negativeKey(ref));
-  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
+  throwRemembered(ref, svc);
   const results = await svc.gql(resolutionOps(ref, "", { post: "...POST_FULL" }), ctx, POST_TASK);
   const resolved = readResolution(ref, "post", "", results, ctx, svc);
   const doc = resolved.doc as RawPostFull;
   if (doc.onlyVisibleToLoggedIn) throw loginOnly();
   return { resolved, doc };
-}
-
-/** What a later request gave: nothing sent, a stop (deadline or cap), a failure of the whole request, or its answer. */
-type Sent = { kind: "none" } | { kind: "stopped" } | { kind: "failed"; error: ToolError } | { kind: "ok"; results: AliasResults };
-
-/** One request, sent only while a request may start; a `ToolError` is that request's failure (¶7: a later part, `Partial:`). */
-async function send(ops: readonly GqlOp[], task: string, ctx: CallContext, svc: Services): Promise<Sent> {
-  if (ops.length === 0) return { kind: "none" };
-  if (!ctx.mayStartRequest()) return { kind: "stopped" };
-  try {
-    return { kind: "ok", results: await svc.gql(ops, ctx, task) };
-  } catch (e) {
-    if (e instanceof CallStopped) return { kind: "stopped" };
-    if (isToolError(e)) return { kind: "failed", error: e };
-    throw e;
-  }
-}
-
-/** One part of a request: its data (undefined when the forum had nothing), or `ok: false` when it was not read or failed. */
-type Part = { ok: true; data: unknown } | { ok: false };
-
-/**
- * The part `alias` of `sent`, read only when `ops` asked for it. A failure of the whole request or of the alias adds its
- * `Partial:` line to `partials`; the forum's "nothing here" (`not_found`, `not_public`) is no data. A stopped or unsent request
- * is not read, and says nothing.
- */
-function partOf(sent: Sent, ops: readonly GqlOp[], alias: string, section: string, partials: string[]): Part {
-  if (!ops.some((o) => o.alias === alias) || sent.kind === "none" || sent.kind === "stopped") return { ok: false };
-  if (sent.kind === "failed") {
-    partials.push(partialLine(section, sent.error));
-    return { ok: false };
-  }
-  const r = sent.results.get(alias);
-  if (r === undefined) return { ok: false };
-  if (!("error" in r)) return { ok: true, data: r.data };
-  if (r.error === "not_found" || r.error === "not_public") return { ok: true, data: undefined };
-  partials.push(partialLine(section, new ToolError(r.error, r.message)));
-  return { ok: false };
 }
 
 // the canonical sequence (steps 4–5)
@@ -235,19 +194,22 @@ async function sequenceOutcome(
       }
       // P17: an adjacent sequence is a `Book.sequences` row of the listing, so it is confirmed public here.
       const ops = wanted.map((w) => neighbourChaptersOp(NEIGHBOUR_ALIAS[w.dir], ctx.confirmPublic("sequence", w.row._id)));
-      const sent = await send(ops, NEIGHBOUR_TASK, ctx, svc);
+      const sent = await send(ops, NEIGHBOUR_TASK, ctx, svc, true);
       if (sent.kind === "stopped") stopped = true;
-      const failures: string[] = [];
+      let failure: string | undefined;
       for (const w of wanted) {
-        const part = partOf(sent, ops, NEIGHBOUR_ALIAS[w.dir], SECTION.neighbour, failures);
-        if (!part.ok) continue;
+        const part = partOf(sent, ops, NEIGHBOUR_ALIAS[w.dir], SECTION.neighbour);
+        if (!part.ok) {
+          failure ??= part.partial;
+          continue;
+        }
         const order = readingOrder(rowsOf<RawChapter>(part.data));
         const post = w.dir === "next" ? order[0] : order.at(-1);
         if (post === undefined) continue;
         shown[w.dir] = `${DIR_WORD[w.dir]}: ${crossText(post.post, w.dir, collection.slug, w.row)}`;
       }
       // One section: request 3 reads both ends, and its failure is one Partial line.
-      if (failures.length > 0) partials.push(failures[0]!);
+      if (failure !== undefined) partials.push(failure);
     }
   }
   const parts = [`Canonical sequence: ${named}`, ...(["prev", "next"] as const).flatMap((dir) => (shown[dir] === undefined ? [] : [shown[dir]!]))];
@@ -269,13 +231,9 @@ function publishedLine(doc: RawPostFull, rec: PostRecord, body: ProcessedBody | 
   return facts.join(SEP);
 }
 
-/** ¶3.8.1: the visible tags by relevance with their number, at most 6, then `+N more` (P12: hidden tags are already gone). */
+/** ¶3.8.1: the post's tags line (`tagsText`), or none when it has no visible tag. */
 function tagsLine(rec: PostRecord): string | undefined {
-  if (rec.tags.length === 0) return undefined;
-  const shown = rec.tags.slice(0, TAGS_SHOWN).map(({ tag, relevance }) => `${quoted(tag.name, NAME_CAP)} ${fmtInt(relevance)} (tag_slug ${tag.slug})`);
-  const rest = rec.tags.length - TAGS_SHOWN;
-  if (rest > 0) shown.push(`+${fmtInt(rest)} more`);
-  return `Tags (relevance): ${shown.join(SEP)}`;
+  return rec.tags.length === 0 ? undefined : `Tags (relevance): ${tagsText(rec.tags)}`;
 }
 
 /**
@@ -531,17 +489,16 @@ async function postPage(input: PageInput, maxTokens: number, ctx: CallContext, s
     ...(sequenceId !== undefined && { sequenceId }),
     listing: seq !== undefined && (seq.canonicalCollectionSlug?.trim() ?? "") !== "" && !collectionsCached(svc),
   });
-  const sent = await send(ops, PARTS_TASK, ctx, svc);
+  const sent = await send(ops, PARTS_TASK, ctx, svc, true);
   let stopped = sent.kind === "stopped";
 
   // Request 2's parts, in request order, so that the Partial lines are too.
   const partials: string[] = [];
-  const part = (alias: string, section: string): Part => partOf(sent, ops, alias, section, partials);
-  const rv = part("rv", SECTION.reviews);
-  const dt = part("dt", SECTION.turns);
-  const ch = part("ch", SECTION.sequence);
+  const rv = partOf(sent, ops, "rv", SECTION.reviews, partials);
+  const dt = partOf(sent, ops, "dt", SECTION.turns, partials);
+  const ch = partOf(sent, ops, "ch", SECTION.sequence, partials);
   const listing: ListingSource = ops.some((o) => o.alias === "col")
-    ? { asked: true, part: () => part("col", SECTION.neighbour), ...(sent.kind === "ok" && { results: sent.results }) }
+    ? { asked: true, part: () => partOf(sent, ops, "col", SECTION.neighbour, partials), ...(sent.kind === "ok" && { results: sent.results }) }
     : { asked: false };
 
   let body = cached;
@@ -686,8 +643,7 @@ async function continuation(entry: CursorEntry, p: GetPostParams, ctx: CallConte
     {
       resolved, doc, ask: { section: stored.section, match: stored.match, includeBody: stored.include_body },
       ...(!restart && { start: state, resume: resumeOf(data) }),
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -707,7 +663,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetPostParams> = {
   name: "get_post",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   required: ["post"],
   run(p, ctx, svc) {

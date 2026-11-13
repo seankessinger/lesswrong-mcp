@@ -14,17 +14,17 @@ import { z } from "zod";
 import { CONFIG } from "../config";
 import { karmaVotes, likersOf, parseReactions } from "../domain/reactions";
 import { isPlaceholder } from "../domain/visibility";
-import { badInput, internalError, notFound, ToolError } from "../errors";
-import { REACTION_FIELDS, reactionItemOp, reactorIdsOp } from "../forum/templates/get_reactions";
+import { badInput, internalError, notFound } from "../errors";
+import { REACTION_FIELDS, reactorIdsOp } from "../forum/templates/get_reactions";
 import { parseRef } from "../ids/parse";
-import { echoOf, negativeKey, readResolution, resolutionOps, resolve, type ResolveSelect } from "../ids/resolve";
+import { echoOf, readResolution, resolutionOps, resolve, throwRemembered, type ResolveSelect } from "../ids/resolve";
 import { sliceAfter } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { CAVEAT, FLAG, fmtInt } from "../render/messages";
-import { agreementText, personText } from "../render/records";
+import { agreementText, counted, personText } from "../render/records";
 import { oneLine } from "../text/sanitize";
 import type {
-  CallContext, Category, Consumed, CursorEntry, Footer, GqlOp, PageItem, ParsedRef, ReactEntry, Reactions, Reactor, Resolved,
+  CallContext, Consumed, CursorEntry, Footer, GqlOp, PageItem, ParsedRef, ReactEntry, Reactions, Reactor, Resolved,
   ResolvedKind, Services, StreamState, ToolDef, ToolOutput,
 } from "../types";
 import { checkContinuation, isRecord, mint, openContinuation, reply } from "./common";
@@ -59,8 +59,6 @@ const SELECT: ResolveSelect = { post: REACTION_FIELDS.post, comment: REACTION_FI
 
 /** A finite number, else undefined (the forum's `null` and a missing field alike). */
 const numberOf = (x: unknown): number | undefined => (typeof x === "number" && Number.isFinite(x) ? x : undefined);
-/** `1 vote`, `2 votes`. */
-const counted = (n: number, one: string, many: string): string => `${fmtInt(n)} ${n === 1 ? one : many}`;
 
 // the item
 
@@ -83,18 +81,14 @@ interface Found {
 /** The same reference read by its id. */
 const idRef = (ref: ParsedRef, id: string): ParsedRef => ({ kind: ref.kind, form: "id", value: id, given: ref.given, notes: [] });
 
-/** ¶4.14 Behaviour: a tag id is asked as a page and as a lens; a bare 17-character string also as a slug, in the same request. */
-function itemOps(ref: ParsedRef, param: Param): GqlOp[] {
-  if (ref.form === "idOrSlug") return resolutionOps(ref, "", SELECT);
-  if (param === "tag") return [reactionItemOp("tag", ref.value), reactionItemOp("lens", ref.value)];
-  return [reactionItemOp(param, ref.value)];
-}
+/** ¶4.14 Behaviour: the resolution ops with the reaction fields: a tag id is asked as a page and as a lens, and a bare
+ * 17-character string also as a slug, in the same request. */
+const itemOps = (ref: ParsedRef): GqlOp[] => resolutionOps(ref, "", SELECT);
 
 /** One item request for `ref` (an id or a bare 17-character string); the resolution is read from its answer. */
 async function requestItem(ref: ParsedRef, param: Param, ctx: CallContext, svc: Services): Promise<Resolved> {
-  const negative = svc.caches.get<{ category: Category; message: string }>("negative", negativeKey(ref));
-  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
-  const results = await svc.gql(itemOps(ref, param), ctx, ITEM_TASK);
+  throwRemembered(ref, svc);
+  const results = await svc.gql(itemOps(ref), ctx, ITEM_TASK);
   return readResolution(ref, param, "", results, ctx, svc);
 }
 
@@ -378,7 +372,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetReactionsParams> = {
   name: "get_reactions",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   oneOf: [["post", "comment", "tag"]],
   run,

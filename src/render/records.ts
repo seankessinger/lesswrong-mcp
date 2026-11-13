@@ -13,8 +13,8 @@ import { reactSummary, visibleReacts } from "../domain/reactions";
 import { day, isoMs, minute } from "../text/dates";
 import { blockText, oneLine } from "../text/sanitize";
 import type {
-  CommentRecord, PageItem, ParentRef, Person, Place, PostRecord, PostRef, RankedThread, RevisionRecord, SeqRef, SequenceRecord, StatusFlags,
-  TagRecord, Thread, UserRecord, VisibleTagRef, WikiEditPage,
+  CommentRecord, PageItem, ParentRef, Person, Place, PostRecord, PostRef, RankedThread, RevisionRecord, SeqRef, SequenceRecord,
+  StatusFlags, TagRecord, Thread, UserPerson, UserRecord, VisibleTagRef, WikiEditPage,
 } from "../types";
 import { estimateTokens, sliceText } from "./budget";
 import { FLAG, fmtInt, listCutMarker } from "./messages";
@@ -37,7 +37,6 @@ const HIGHLIGHT_TAGS = /<\/?em>/gi;
 const HIDDEN_POST = "a post that is not publicly visible";
 const HIDDEN_SEQUENCE = "a sequence that is not publicly visible";
 
-type UserPerson = Extract<Person, { kind: "user" }>;
 type MaskedWhy = Extract<Person, { kind: "none" }>["why"];
 
 /** How a reply names a parent whose author is masked (¶3.8.1). */
@@ -54,8 +53,16 @@ const nameText = (s: string): string => quoted(oneLine(s, CONFIG.render.caps.nam
 const titleText = (s: string): string => quoted(oneLine(s, CONFIG.render.caps.title));
 const afWord = (af: boolean): string => (af ? FLAG.AF : FLAG.LW_ONLY);
 
+/** ¶3.8.1: a post's visible tags by relevance with their number, at most 6, then `+N more` (P12: hidden tags are already gone). */
+export function tagsText(tags: readonly { tag: { name: string; slug: string }; relevance: number }[]): string {
+  const shown = tags.slice(0, TAGS_SHOWN).map(({ tag, relevance }) => `${nameText(tag.name)} ${fmtInt(relevance)} (tag_slug ${tag.slug})`);
+  const rest = tags.length - TAGS_SHOWN;
+  if (rest > 0) shown.push(`+${fmtInt(rest)} more`);
+  return shown.join(SEP);
+}
+
 /** A whole count with its noun, comma-grouped from 1,000: `1 vote`, `612 votes`, `7 people`. */
-function counted(n: number, one: string, many = `${one}s`): string {
+export function counted(n: number, one: string, many = `${one}s`): string {
   return `${fmtInt(n)} ${n === 1 ? one : many}`;
 }
 
@@ -171,12 +178,7 @@ export function postLine(r: PostRecord, opts: PostLineOpts = {}): string {
   else if (opts.newestListed !== undefined) facts.push(FLAG.newestListed(day(opts.newestListed)));
   lines.push(indent + facts.join(SEP), indent + r.url);
 
-  if (r.tags.length > 0) {
-    const shown = r.tags.slice(0, TAGS_SHOWN).map(({ tag, relevance }) => `${nameText(tag.name)} ${fmtInt(relevance)} (tag_slug ${tag.slug})`);
-    const rest = r.tags.length - TAGS_SHOWN;
-    if (rest > 0) shown.push(`+${fmtInt(rest)} more`);
-    lines.push(`${indent}tags (relevance): ${shown.join(SEP)}`);
-  }
+  if (r.tags.length > 0) lines.push(`${indent}tags (relevance): ${tagsText(r.tags)}`);
   if (opts.excerpt && r.excerpt !== undefined) {
     const excerpt = oneLine(r.excerpt, CONFIG.render.excerptChars);
     if (excerpt !== "") lines.push(`${indent}> ${excerpt}`);

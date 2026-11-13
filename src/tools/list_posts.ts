@@ -23,25 +23,24 @@ import { badInput, CallStopped, internalError } from "../errors";
 import { buildSearch } from "../forum/search";
 import { listPostsOp, type ListPostsTerms, type PostsView } from "../forum/templates/list_posts";
 import { postsByIdsOp } from "../forum/templates/shared";
-import { isEntityId } from "../ids/parse";
 import { echoOf } from "../ids/resolve";
 import {
   collect, compareLocal, fingerprint, lightScan, listPage, searchPageAllowed, stateAfter, type KeysetSource, type OffsetSource,
   type PagedSource, type RawPage,
 } from "../paging/pager";
-import { CONVENTIONS_LINE, listPostsDefaultSort, P } from "../params/vocabulary";
+import { FORUM_TEXT, listPostsDefaultSort, P } from "../params/vocabulary";
 import { CAVEAT, DEPTH_HINT, emptyText, END_SEARCH_DEPTH, FLAG, fmtInt, SHORT_PAGE_NOTE } from "../render/messages";
 import { personText, postLine } from "../render/records";
 import { effectiveDate, isoMs, parseRange, toViewTerms } from "../text/dates";
 import { sanitizeQuery } from "../text/phrases";
 import { oneLine } from "../text/sanitize";
 import type {
-  CallContext, Consumed, CursorEntry, CursorState, DateRange, Facet, Footer, PageItem, RawPostCard, RawPostLight, SearchHit,
+  CallContext, Consumed, CursorEntry, CursorState, DateRange, Facet, Footer, PageItem, RawPostCard, RawPostLight,
   SearchResult, SearchSpec, Services, SortValue, StopReason, StreamState, ToolDef, ToolOutput,
 } from "../types";
 import {
-  checkContinuation, dateEchoes, type Filters, givenArgs, isRecord, mint, nextText, openContinuation, periodText, positionText, reply, resolveFilters, rowsOf,
-  setting, tagFilterText, tagIdOf,
+  checkContinuation, dateEchoes, givenArgs, isRecord, mint, nextText, openContinuation, periodText, positionText, reply,
+  resolveFilters, resumedFrom, rowsOf, searchHitId, setting, tagFilterText, tagIdOf, type Filters,
 } from "./common";
 import { aliasData } from "./loaders";
 
@@ -53,7 +52,7 @@ export type ListPostsParams = {
 
 const TITLE = "What did X post about T in a period, best first?";
 /** ¶4.5, verbatim. */
-const DESCRIPTION_QUOTE = "List posts with filters, best first or by date. limit counts posts. Filters: user (their own and coauthored posts; sub-questions and group posts that the site lists only under their author are included, flagged), tag (only posts tagged with it, relevance 1 or more), date_from/date_to (posting date), af_only, curated_only, frontpage_only, questions_only, min_karma (karma at least N, checked here on each post's current karma; a high one over a long period can take several pages). sort: top (karma; the default when tag is given), new (the default otherwise), old, active (the forum's latest-comment date first, as the site's \"Recent Comments\" sort; that date isn't printed: a draft comment moves it too, and uncommented posts, like some commented ones, count their posting date), tag_relevance (needs tag: the tag's relevance score on the post, not quality), curated_date (needs curated_only), af_top (AF posts by AF karma, then the others by karma; needs user or tag, and at most 2,000 matching posts). query (only with tag): after the tagged posts, posts the forum's search finds for these words (of two words, either is enough) that pass every other filter but are not tagged (site search by karma; it knows only primary authors, so coauthored posts are missed, and has no negative-karma or unlisted posts); the first page shows up to 10 of them, and the cursor continues them once the tagged list ends. Event and meetup posts are not listed here; they open by id and can appear in search. Quick-take containers and posts that are not publicly visible are never listed; negative-karma posts are included unless min_karma excludes them (not in query's untagged section). Each post shows ids, title, authors, date, karma and votes, comment count (~), AF and curated/frontpage/pinned/Best-of status, tags with relevance, and an excerpt. With tag and no user, the header also gives the forum's count of the listed posts when every filter was applied by the forum. Paging: new and old go back without limit (site-wide lists filtered by nothing but af_only stop after 500 posts). For the other sorts, this server reads up to about the 2,000th result in this order (narrow the dates to go further), and rankings can shift between pages as votes arrive.";
+const DESCRIPTION_QUOTE = "List posts with filters, best first or by date. limit counts posts. Filters: user (their own and coauthored posts; sub-questions and group posts that the site lists only under their author are included, flagged), tag (only posts tagged with it, relevance 1 or more), date_from/date_to (posting date), af_only, curated_only, frontpage_only, questions_only, min_karma (karma at least N, checked here on each post's current karma; a high one over a long period can take several pages). Dates are UTC; date_to includes the whole day, month or year it names. sort: top (karma; the default when tag is given), new (the default otherwise), old, active (the forum's latest-comment date first, as the site's \"Recent Comments\" sort; that date isn't printed: a draft comment moves it too, and uncommented posts, like some commented ones, count their posting date), tag_relevance (needs tag: the tag's relevance score on the post, not quality), curated_date (needs curated_only), af_top (AF posts by AF karma, then the others by karma; needs user or tag, and at most 2,000 matching posts). query (only with tag): after the tagged posts, posts the forum's search finds for these words (of two words, either is enough) that pass every other filter but are not tagged (site search by karma; it knows only primary authors, so coauthored posts are missed, and has no negative-karma or unlisted posts); the first page shows up to 10 of them, and the cursor continues them once the tagged list ends. Event and meetup posts are not listed here; they open by id and can appear in search. Quick-take containers and posts that are not publicly visible are never listed; negative-karma posts are included unless min_karma excludes them (not in query's untagged section). Each post shows ids, title, authors, date, karma and votes, comment count (~), AF and curated/frontpage/pinned/Best-of status, tags with relevance, and an excerpt. With tag and no user, the header also gives the forum's count of the listed posts when every filter was applied by the forum. Paging: new and old go back without limit (site-wide lists filtered by nothing but af_only stop after 500 posts). For the other sorts, this server reads up to about the 2,000th result in this order (narrow the dates to go further), and rankings can shift between pages as votes arrive.";
 
 const LIST_TASK = "listing posts";
 const SCAN_TASK = "scanning posts";
@@ -490,11 +489,6 @@ function sectionKeeps(plan: Plan, doc: RawPostCard | undefined): doc is RawPostC
   return tagId === undefined || (doc.tagRelevance?.[tagId] ?? 0) < 1;
 }
 
-const hitId = (hit: SearchHit): string | undefined => {
-  const id = typeof hit._id === "string" ? hit._id : hit.objectID;
-  return typeof id === "string" && isEntityId(id) ? id : undefined;
-};
-
 /**
  * One section page: one search page (one POST) and one hydrate, walked from `state` until `want` posts are kept. Every hit of
  * the search page is hydrated but the posts this page's main list holds, so a later page that reads the same search page
@@ -531,7 +525,7 @@ async function runSection(
     next = undefined;
   }
   const hits = result.hits.flatMap((hit, index) => {
-    const id = hitId(hit);
+    const id = searchHitId(hit);
     return id === undefined ? [] : [{ id, index }];
   });
   const ids = [...new Set(hits.map((h) => h.id).filter((id) => !inMain.has(id)))];
@@ -812,8 +806,7 @@ async function continuation(entry: CursorEntry, p: ListPostsParams, ctx: CallCon
   return pageOf(
     {
       plan: planOf(ask, range, filters), state: entry.state, ...(from !== undefined && { from }),
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -841,7 +834,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<ListPostsParams> = {
   name: "list_posts",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   run(p, ctx, svc) {
     const entry = openContinuation("list_posts", p.cursor, svc);

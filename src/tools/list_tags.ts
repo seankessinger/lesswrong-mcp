@@ -15,7 +15,7 @@ import { CORE_GROUPING_LIMIT, tagByIdOp, tagRefsByIdOps } from "../forum/templat
 import { parseRef } from "../ids/parse";
 import { echoOf, resolve } from "../ids/resolve";
 import { fingerprint, listPage } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { CAVEAT, emptyText, endMostReturned } from "../render/messages";
 import { tagCard } from "../render/records";
 import { oneLine } from "../text/sanitize";
@@ -23,7 +23,9 @@ import type {
   CallContext, Consumed, CursorEntry, Footer, PageItem, RawMdocRef, RawTagList, RawTagRef, Resolved, Services, StreamState, ToolDef,
   ToolOutput,
 } from "../types";
-import { checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, setting } from "./common";
+import {
+  checkContinuation, givenArgs, isRecord, mint, nextText, openContinuation, positionText, reply, resumedFrom, setting,
+} from "./common";
 import { aliasData, loadCoreGrouping, type TagSet } from "./loaders";
 
 export type ListTagsParams = { tag?: string; limit: number; cursor?: string; max_tokens: number };
@@ -188,8 +190,7 @@ async function continuation(entry: CursorEntry, p: ListTagsParams, ctx: CallCont
   return tagsPage(
     {
       core, set, state: start, limit: stored.limit,
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, svc,
   );
@@ -207,7 +208,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<ListTagsParams> = {
   name: "list_tags",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   run(p, ctx, svc) {
     const entry = openContinuation("list_tags", p.cursor, svc);

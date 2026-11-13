@@ -7,12 +7,10 @@
 import { CONFIG } from "../config";
 import { blockText } from "../text/sanitize";
 import type {
-  CommentRecord, Forest, ParentRef, Person, Place, RawCommentList, RawCommentRef, RawCommentTree, Thread, TreeNode,
+  CommentRecord, Forest, ParentRef, Place, RawCommentList, RawCommentRef, RawCommentTree, Thread, TreeNode, UserPerson,
 } from "../types";
 import { commentSignals, karmaVotes, parseReactions } from "./reactions";
 import { attributable, authorOf, commentPublic, isPlaceholder, maskPostRef, maskTagRef } from "./visibility";
-
-type UserPerson = Extract<Person, { kind: "user" }>;
 
 /** Q50.21, ¶3.8.2: a comment is `edited` only when its last edit came more than 60 s after it was posted. */
 const EDITED_AFTER_MS = 60_000;
@@ -214,9 +212,7 @@ function toThread(root: TreeNode): Thread {
 
 /** P19: the named author of an attributable comment, else `null` (placeholder, anonymous author, deleted account). */
 function userOf(node: TreeNode): UserPerson | null {
-  if (!attributable(node.c)) return null;
-  const author = node.c.author;
-  return author.kind === "user" ? author : null;
+  return attributable(node.c) ? node.c.author : null;
 }
 
 function uid(node: TreeNode): string | null {

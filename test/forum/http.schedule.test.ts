@@ -37,16 +37,6 @@ describe("endpoints and headers", () => {
     expect(rig.calls.map((c) => c.body)).toEqual(['{"q":1}', '{"queries":[]}']);
   });
 
-  it("S1 Q67 refuses to be configured with any URL other than the two LessWrong endpoints", () => {
-    for (const config of [
-      { graphqlUrl: "https://www.alignmentforum.org/graphql" },
-      { graphqlUrl: "https://www.lesswrong.com/api/post" },
-      { searchUrl: "https://www.lesswrong.com/api/search?type=posts" },
-    ])
-      expect(() => httpRig(OK, { config })).toThrow(
-        "Unexpected failure in http (endpoint not allowed). Please report this.",
-      );
-  });
 });
 
 describe("single flight and spacing", () => {

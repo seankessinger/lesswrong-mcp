@@ -19,27 +19,29 @@ import { likersOf } from "../domain/reactions";
 import { pageType } from "../domain/tags";
 import { tagUrl } from "../domain/urls";
 import { maskTagRef, pageOf, postPublic, tagPublic, visibleChildren } from "../domain/visibility";
-import { badInput, CallStopped, internalError, isToolError, notFound, ToolError } from "../errors";
+import { badInput, internalError, isToolError, notFound } from "../errors";
 import { DISCUSSION_LIMIT, getTagRequest1Ops, getTagRequest2Ops, POSTS_SPARE, type TagPostsOrder } from "../forum/templates/get_tag";
 import { isEntityId, parseRef } from "../ids/parse";
-import { echoOf, negativeKey, readResolution, rememberResolution, resolvedFrom } from "../ids/resolve";
+import { echoOf, readResolution, rememberResolution, resolvedFrom, throwRemembered } from "../ids/resolve";
 import { fingerprint, sliceAfter, slicePosition } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { estimateTokens } from "../render/budget";
 import { fitsWhole } from "../render/layout";
 import { CAVEAT, emptyText, FLAG, fmtInt, matchLine, partialLine } from "../render/messages";
-import { matchHitItem, postLine, quote, tagRefText, textOutlineLine } from "../render/records";
+import { counted, matchHitItem, postLine, quote, tagRefText, textOutlineLine } from "../render/records";
 import { day } from "../text/dates";
 import { blockText, oneLine } from "../text/sanitize";
 import type {
-  AliasResults, ArbitalRelation, CallContext, Consumed, CursorEntry, CursorState, Footer, GqlOp, PageItem, PageSpec, ParsedRef, PublicTagId,
+  AliasResults, ArbitalRelation, CallContext, Consumed, CursorEntry, CursorState, Footer, PageItem, PageSpec, ParsedRef, PublicTagId,
   RawLensRef, RawMdocRef, RawPostCard, RawTagFull, RawTagRef, Resolved, Services, StopReason, StreamState, ToolDef, ToolOutput,
   VisibleTagRef,
 } from "../types";
-import { checkContinuation, givenArgs, handOffCall, isRecord, mint, openContinuation, reply, rowsOf, setting } from "./common";
+import {
+  checkContinuation, givenArgs, handOffCall, isRecord, mint, openContinuation, reply, resumedFrom, rowsOf, setting,
+} from "./common";
 import { listPostsEffective, tool as listPostsTool, type ListPostsParams } from "./list_posts";
 import { listTagsEffective, tool as listTagsTool, type ListTagsParams } from "./list_tags";
-import { loadCoreGrouping, type TagSet } from "./loaders";
+import { loadCoreGrouping, partOf, send, type TagSet } from "./loaders";
 
 type GetTagParams = {
   tag?: string; section?: number; match?: string; sort: "top" | "tag_relevance" | "new" | "old"; limit: number; af_only: boolean;
@@ -95,8 +97,6 @@ const RELATIONS: readonly (readonly [ArbitalRelation, string])[] = [
 ];
 
 const quoted = (s: string | null | undefined): string => `"${oneLine(s, NAME_CAP)}"`;
-/** A whole count with its noun: `1 word`, `2,410 words`. */
-const counted = (n: number, one: string): string => `${fmtInt(n)} ${n === 1 ? one : `${one}s`}`;
 /** A public tag reference, or undefined for a hidden one (P12). */
 function visibleRef(t: RawTagRef | null | undefined): VisibleTagRef | undefined {
   const ref = maskTagRef(t);
@@ -187,8 +187,7 @@ function openedFrom(resolved: Resolved, results: AliasResults): Omit<Opened, "pa
  * remembers its page under the page's id, as a tag (the hand-off continuations re-check the page by that id).
  */
 async function readTag(ref: ParsedRef, ctx: CallContext, svc: Services): Promise<Opened> {
-  const negative = svc.caches.get<{ category: ToolError["category"]; message: string }>("negative", negativeKey(ref));
-  if (negative !== undefined) throw new ToolError(negative.category, negative.message);
+  throwRemembered(ref, svc);
   const results = await svc.gql(getTagRequest1Ops(ref), ctx, PAGE_TASK);
   const resolved = readResolution(ref, "tag", "", results, ctx, svc);
   const opened = openedFrom(resolved, results);
@@ -197,36 +196,6 @@ async function readTag(ref: ParsedRef, ctx: CallContext, svc: Services): Promise
 }
 
 // request 2
-
-/** What request 2 gave: a stop (deadline or cap), a failure of the whole request, or its answer. */
-type Sent = { kind: "stopped"; why: StopReason } | { kind: "failed"; error: ToolError } | { kind: "ok"; results: AliasResults };
-
-async function send(ops: readonly GqlOp[], ctx: CallContext, svc: Services): Promise<Sent> {
-  try {
-    return { kind: "ok", results: await svc.gql(ops, ctx, PARTS_TASK) };
-  } catch (e) {
-    if (e instanceof CallStopped) return { kind: "stopped", why: e.reason };
-    if (isToolError(e)) return { kind: "failed", error: e };
-    throw e;
-  }
-}
-
-/** One part of request 2: its data (undefined when the forum had nothing), or `ok: false` when it failed. */
-type Part = { ok: true; data: unknown } | { ok: false };
-
-/** The part `alias` of an answered or failed request 2; a failure adds its `Partial:` line (¶3.9). */
-function partOf(sent: Exclude<Sent, { kind: "stopped" }>, alias: string, section: string, partials: string[]): Part {
-  if (sent.kind === "failed") {
-    partials.push(partialLine(section, sent.error));
-    return { ok: false };
-  }
-  const r = sent.results.get(alias);
-  if (r === undefined) return { ok: false };
-  if (!("error" in r)) return { ok: true, data: r.data };
-  if (r.error === "not_found" || r.error === "not_public") return { ok: true, data: undefined };
-  partials.push(partialLine(section, new ToolError(r.error, r.message)));
-  return { ok: false };
-}
 
 /** ¶4.8 step 2: the distinct Arbital page ids of `arbitalLinkedPages`, in relation order (only ids a template can carry). */
 function arbitalIdsOf(page: RawTagFull): string[] {
@@ -460,13 +429,14 @@ function factsLine(o: Opened, counts: Counts): { line: string; droppedSubtags: n
   // The site's date counts an edit to any of the page's fields (textLastUpdatedAt filters by document, not field), and the page
   // shows it only beside the contributors it can name, so it is the site's "last updated", not the text's and not always shown;
   // without it, the newest save is only a save.
-  if (o.text !== null && updated !== undefined && !page.isPlaceholderPage) {
-    facts.push(`last updated ${updated}, as the site dates it (${which} text now v${oneLine(o.text.version, VERSION_CAP)})`);
-  } else if (o.text !== null && updated !== undefined) {
-    // A placeholder's page shows no date (RedlinkTagPage); its text's newest save is given as one.
-    if (edited !== undefined) facts.push(`${which} text last saved ${edited} (v${oneLine(o.text.version, VERSION_CAP)})`);
+  if (o.text !== null) {
+    if (updated !== undefined && !page.isPlaceholderPage) {
+      facts.push(`last updated ${updated}, as the site dates it (${which} text now v${oneLine(o.text.version, VERSION_CAP)})`);
+    } else if (edited !== undefined) {
+      // A placeholder's page shows no date (RedlinkTagPage), so its text's newest save is given, as when the site has no date.
+      facts.push(`${which} text last saved ${edited} (v${oneLine(o.text.version, VERSION_CAP)})`);
+    }
   }
-  else if (o.text !== null && edited !== undefined) facts.push(`${which} text last saved ${edited} (v${oneLine(o.text.version, VERSION_CAP)})`);
   return { line: facts.join(SEP), droppedSubtags: subTags.length - subtags.length };
 }
 
@@ -521,21 +491,21 @@ async function request2(input: PageInput, ctx: CallContext, svc: Services): Prom
   const ops = getTagRequest2Ops({
     tagId: opened.pageId, sortedBy: SORTED_BY[ask.sort], af: ask.afOnly, limit: ask.limit, core: sendGrouping, arbitalIds,
   });
-  const sent = await send(ops, ctx, svc);
+  const sent = await send(ops, PARTS_TASK, ctx, svc);
   if (sent.kind === "stopped") return { stopped: sent.why };
 
   const partials: string[] = [];
   const notes: string[] = [];
   const counts: Counts = {};
   let posts: PostsBlock | undefined;
-  const p = partOf(sent, "p", SECTION.posts, partials);
+  const p = partOf(sent, ops, "p", SECTION.posts, partials);
   if (p.ok) {
     posts = postsBlock({ page, ask, callerTag: input.callerTag, limitGiven: input.limitGiven }, p.data, svc);
     if (posts.forumCount !== undefined) counts.forumCount = posts.forumCount;
     notes.push(...(posts.shown > 0 ? [CAVEAT["C-TAGGED"]] : []), CAVEAT["C-EVENTS"]);
   }
   const postsLines = (excerpts: boolean): string[] => posts?.lines(excerpts) ?? [];
-  const dc = partOf(sent, "dc", SECTION.discussion, partials);
+  const dc = partOf(sent, ops, "dc", SECTION.discussion, partials);
   if (dc.ok) counts.discussion = rowsOf<{ _id: unknown }>(dc.data).length;
 
   let grouping: string[] = [];
@@ -544,7 +514,7 @@ async function request2(input: PageInput, ctx: CallContext, svc: Services): Prom
   } else if (sendGrouping) {
     if (sent.kind === "failed") {
       partials.push(partialLine(SECTION.grouping, sent.error));
-    } else {
+    } else if (sent.kind === "ok") {
       try {
         grouping = groupingLines(await loadCoreGrouping(page._id, ctx, svc, sent.results), { page, callerTag: input.callerTag }, svc);
       } catch (e) {
@@ -559,7 +529,7 @@ async function request2(input: PageInput, ctx: CallContext, svc: Services): Prom
   if (arbitalIds.length > 0) {
     if (sent.kind === "failed") {
       partials.push(partialLine(SECTION.arbital, sent.error));
-    } else {
+    } else if (sent.kind === "ok") {
       const a = arbitalLine(page, arbitalIds, sent.results);
       arbital = a.line === undefined ? [] : [a.line];
       arbitalDropped = a.dropped;
@@ -663,8 +633,7 @@ async function continuation(entry: CursorEntry, p: GetTagParams, ctx: CallContex
     {
       opened, ask: { section: stored.section, match: stored.match, sort: stored.sort, limit: stored.limit, afOnly: stored.af_only },
       callerTag: firstTag, limitGiven: Object.hasOwn(entry.args, "limit"), ...(!page1 && { start: state }),
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -686,7 +655,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<GetTagParams> = {
   name: "get_tag",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   required: ["tag"],
   run(p, ctx, svc) {

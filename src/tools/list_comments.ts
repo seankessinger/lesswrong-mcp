@@ -22,7 +22,7 @@ import {
   collect, compareLocal, lightScan, listPage, scanThenKeep, stateAfter, type Collected, type KeysetSource, type OffsetSource,
   type PagedSource, type RawPage,
 } from "../paging/pager";
-import { CONVENTIONS_LINE, P } from "../params/vocabulary";
+import { FORUM_TEXT, P } from "../params/vocabulary";
 import { CAVEAT, DEPTH_HINT, emptyText, fmtInt, SHORT_PAGE_NOTE } from "../render/messages";
 import { commentBlock, personText } from "../render/records";
 import { effectiveDate, isoMs, parseRange, requireWindow, toViewTerms } from "../text/dates";
@@ -31,7 +31,8 @@ import type {
   Services, StopReason, StreamState, ToolDef, ToolOutput,
 } from "../types";
 import {
-  checkContinuation, dateEchoes, givenArgs, isRecord, mint, nextText, openContinuation, periodText, positionText, reply, rowsOf, setting,
+  checkContinuation, dateEchoes, givenArgs, isRecord, mint, nextText, openContinuation, periodText, positionText, reply,
+  resumedFrom, rowsOf, setting,
 } from "./common";
 import { aliasData } from "./loaders";
 
@@ -44,7 +45,7 @@ type Sort = ListCommentsParams["sort"];
 
 const TITLE = "What has X been commenting on? What is being said lately?";
 /** ¶4.6, verbatim. */
-const DESCRIPTION_QUOTE = `List comments across the site or by one person: what someone has been commenting on, the latest comments site-wide, or quick takes. limit counts comments. Filters: user, date_from/date_to (posting date), af_only, quick_takes_only (top-level quick takes, i.e. shortform posts, only), min_karma. sort: new (default), old, top (karma). Without user, sort top and quick_takes_only each need both date_from and date_to, at most 31 days apart (e.g. date_from "2024-03-01", date_to "2024-03-31"). Quick takes, and a person's comments by top, are ranked over at most 2,000 matching comments (narrow the dates beyond that). Comments whose post hides their karma are left out of sort top and min_karma. Each comment shows where it is (its post with post_id and AF status, its wiki page, or "quick take" ("in a quick take" for a reply)), who it replies to (name and ids; no text), date, karma and votes, agreement, reactions, flags, AF karma or "LW only", its ids and its text (cut at about 1,500 tokens; get_comments comment=<comment_id> shows it whole in its thread). Not listed: comment placeholders and the turns of old-style debates. For one post's discussion use get_comments. Paging: new and old go back without limit (site-wide lists filtered by nothing but af_only stop after 500 comments). For sort top, this server reads up to about the 2,000th result in this order, and rankings can shift between pages as votes arrive.`;
+const DESCRIPTION_QUOTE = `List comments across the site or by one person: what someone has been commenting on, the latest comments site-wide, or quick takes. limit counts comments. Filters: user, date_from/date_to (posting date), af_only, quick_takes_only (top-level quick takes, i.e. shortform posts, only), min_karma. sort: new (default), old, top (karma). Without user, sort top and quick_takes_only each need both date_from and date_to, at most 31 days apart (e.g. date_from "2024-03-01", date_to "2024-03-31"). Dates are UTC; date_to includes the whole day, month or year it names. Quick takes, and a person's comments by top, are ranked over at most 2,000 matching comments (narrow the dates beyond that). Comments whose post hides their karma are left out of sort top and min_karma. Each comment shows where it is (its post with post_id and AF status, its wiki page, or "quick take" ("in a quick take" for a reply)), who it replies to (name and ids; no text), date, karma and votes, agreement, reactions, flags, AF karma or "LW only", its ids and its text (cut at about 1,500 tokens; get_comments comment=<comment_id> shows it whole in its thread). Not listed: comment placeholders and the turns of old-style debates. For one post's discussion use get_comments. Paging: new and old go back without limit (site-wide lists filtered by nothing but af_only stop after 500 comments). For sort top, this server reads up to about the 2,000th result in this order, and rankings can shift between pages as votes arrive.`;
 
 const LIST_TASK = "listing comments";
 const SCAN_TASK = "scanning comments";
@@ -536,8 +537,7 @@ async function continuation(entry: CursorEntry, p: ListCommentsParams, ctx: Call
   return pageOf(
     {
       plan: planOf(ask, range, user), state: entry.state, ...(from !== undefined && { from }),
-      echo: { ...ctx, given: new Set([...ctx.given, ...Object.keys(entry.args)]) },
-      args: { ...entry.args }, effective: { ...entry.effective },
+      ...resumedFrom(entry, ctx),
     },
     p.max_tokens, ctx, svc,
   );
@@ -561,7 +561,7 @@ const schema = z.strictObject({
 export const tool: ToolDef<ListCommentsParams> = {
   name: "list_comments",
   title: TITLE,
-  description: `${DESCRIPTION_QUOTE}\n\n${CONVENTIONS_LINE}`,
+  description: `${DESCRIPTION_QUOTE}\n\n${FORUM_TEXT}`,
   schema,
   run(p, ctx, svc) {
     const entry = openContinuation("list_comments", p.cursor, svc);

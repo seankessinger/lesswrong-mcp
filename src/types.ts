@@ -177,6 +177,8 @@ export interface RawCollection { _id: string; slug: string; title: string; conte
 export type Person =
   | { kind: "user"; id: string; slug: string | null; name: string }
   | { kind: "none"; why: "comment placeholder" | "author not publicly visible" | "account not publicly visible" };
+/** A person with a named account: the only kind a comment counts toward (P19). */
+export type UserPerson = Extract<Person, { kind: "user" }>;
 export interface VisiblePostRef { hidden: false; id: string; title: string; slug: string; af: boolean; event: boolean; unlisted: boolean; question: boolean; shortform: boolean }
 export type PostRef = VisiblePostRef | { hidden: true };
 export interface VisibleTagRef { hidden: false; id: string; name: string; slug: string; wikiOnly: boolean; adminOnly?: true }   // adminOnly only when set (#135)
@@ -296,12 +298,12 @@ export interface GqlOp {
 export type AliasResult = { data: unknown } | { error: Category; message: string };
 export type AliasResults = ReadonlyMap<string, AliasResult>;
 export interface HttpConfig {
-  graphqlUrl: string; searchUrl: string; userAgent: string;
+  userAgent: string;
   spacingMs: number; maxSpacingMs: number; halveAfterSuccesses: number;
   retryDelayMs: number; retryJitter: number;
   retryAfterCapMs: number; pausesMs: readonly number[]; episodeResetMs: number;
   inCallRetryMaxWaitMs: number; inCallRetriesMax: number;
-  requestTimeoutMaxMs: number; maxResponseBytes: number;
+  maxResponseBytes: number;
   sessionWindows: readonly { ms: number; requests: number; bytes: number; label: string }[];
   responseTtlMs: number;
 }
@@ -460,7 +462,7 @@ export interface ToolOutput { text: string; isError: boolean }
 export interface ToolDef<P = any> {
   name: ToolName;
   title: string;
-  description: string;                            // spec quote + "\n\n" + CONVENTIONS_LINE
+  description: string;                            // the spec quote + "\n\n" + FORUM_TEXT; the other shared conventions are the INSTRUCTIONS
   schema: ZodObject<ZodRawShape>;                 // strict; required parameters are optional here (a cursor may replace them)
   required?: readonly string[];                   // required unless `cursor` is given
   oneOf?: readonly (readonly string[])[];         // "exactly one of" groups, checked first, unless `cursor` is given
